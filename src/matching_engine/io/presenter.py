@@ -20,10 +20,13 @@ projeção, trocar a formatação não toca em uma linha do núcleo.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import assert_never
+from typing import Final, assert_never
 
-from matching_engine.domain.events import Event, OrderAccepted, Trade
+from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
 from matching_engine.domain.price import Ticks, format_price
+
+_BIDS_HEADER: Final = "Ordens de Compra"
+_ASKS_HEADER: Final = "Ordens de Venda"
 
 
 def format_events(events: Sequence[Event]) -> list[str]:
@@ -57,6 +60,11 @@ def format_events(events: Sequence[Event]) -> list[str]:
                     lines.append(_trade_line(pending_price, pending_quantity))
                     pending_price, pending_quantity = None, 0
                 lines.append(_accepted_line(event))
+            case BookSnapshot():
+                if pending_price is not None:
+                    lines.append(_trade_line(pending_price, pending_quantity))
+                    pending_price, pending_quantity = None, 0
+                lines.extend(_book_lines(event))
             case _:
                 assert_never(event)
 
@@ -73,6 +81,46 @@ def _trade_line(price: Ticks, quantity: int) -> str:
     falso sobre quem executou.
     """
     return f"Trade, price: {format_price(price)}, qty: {quantity}"
+
+
+def _book_lines(snapshot: BookSnapshot) -> list[str]:
+    """As duas colunas do livro, lado a lado, com o cabeçalho e o separador.
+
+    A largura de cada coluna é medida a partir do próprio conteúdo — o maior entre o
+    cabeçalho e a maior linha daquele lado —, e não fixada num número. Preço tem largura
+    variável (``10``, ``9.99``, ``10.5``) e quantidade também, de modo que qualquer largura
+    constante ou estouraria a coluna no primeiro preço longo, ou deixaria um vão permanente.
+
+    Os dois lados quase nunca têm o mesmo número de ordens, então o mais curto é completado
+    com string vazia até o comprimento do mais longo: a tabela é retangular mesmo quando o
+    livro não é.
+
+    Cada linha termina com ``rstrip``. Sem isso, a linha de um lado só carregaria espaços
+    invisíveis até a coluna da direita, e espaço invisível é o que faz um teste golden
+    falhar sem que a diferença apareça na tela, e um diff acusar mudança onde não houve.
+    """
+    bids = [_entry_line(entry) for entry in snapshot.bids]
+    asks = [_entry_line(entry) for entry in snapshot.asks]
+    bids_width = max([len(_BIDS_HEADER), *(len(line) for line in bids)])
+    asks_width = max([len(_ASKS_HEADER), *(len(line) for line in asks)])
+
+    lines = [
+        _book_row(_BIDS_HEADER, _ASKS_HEADER, bids_width),
+        f"{'-' * bids_width}-|-{'-' * asks_width}",
+    ]
+    for index in range(max(len(bids), len(asks))):
+        bid = bids[index] if index < len(bids) else ""
+        ask = asks[index] if index < len(asks) else ""
+        lines.append(_book_row(bid, ask, bids_width))
+    return lines
+
+
+def _entry_line(entry: BookEntry) -> str:
+    return f"{entry.quantity} @ {format_price(entry.price)}"
+
+
+def _book_row(left: str, right: str, left_width: int) -> str:
+    return f"{left.ljust(left_width)} | {right}".rstrip()
 
 
 def _accepted_line(event: OrderAccepted) -> str:

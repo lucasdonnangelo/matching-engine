@@ -169,13 +169,32 @@ def test_an_internal_runtime_error_is_not_swallowed() -> None:
         ("cancel order 1", "cancel order"),
         ("modify order 1 qty 5", "modify order"),
         ("modify order 1 price 10", "modify order"),
-        ("print book", "print book"),
     ],
 )
 def test_the_commands_that_are_not_implemented_yet_name_themselves(line: str, name: str) -> None:
     cli = Cli(MatchingEngine())
 
     assert cli.execute(line) == [f"Error: comando ainda não implementado: {name}"]
+
+
+def test_print_book_shows_the_book() -> None:
+    cli = Cli(MatchingEngine())
+    for line in ["limit buy 10 200", "limit buy 9.99 100", "limit sell 10.5 100"]:
+        cli.execute(line)
+
+    assert cli.execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "200 @ 10         | 100 @ 10.5",
+        "100 @ 9.99       |",
+    ]
+
+
+def test_print_book_on_an_empty_book_still_shows_the_header() -> None:
+    assert Cli(MatchingEngine()).execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+    ]
 
 
 @pytest.mark.parametrize("line", ["quit", "exit", "QUIT"])

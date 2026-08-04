@@ -78,5 +78,40 @@ class OrderAccepted:
     quantity: int
 
 
-type Event = Trade | OrderAccepted
+@dataclass(frozen=True, slots=True)
+class BookEntry:
+    """Uma ordem viva na visualização do livro: o que resta dela, ao preço em que está.
+
+    ``quantity`` é o remanescente, e não a quantidade original: o livro oferece o que
+    sobrou, e é isso que quem lê a tela precisa poder acreditar.
+    """
+
+    quantity: int
+    price: Ticks
+
+
+@dataclass(frozen=True, slots=True)
+class BookSnapshot:
+    """O livro inteiro no instante em que foi pedido, dos dois lados, em ordem de prioridade.
+
+    É **valor**, não vista. Tuplas imutáveis de escalares, sem referência ao ``OrderBook``
+    — o mesmo motivo pelo qual nenhum evento carrega ``Order`` viva. Um snapshot que
+    apontasse para o livro seria formatado depois de ser produzido, e mostraria o estado do
+    momento da formatação, não o do momento em que foi pedido. Como valor, o que se imprime
+    é o que se pediu, aconteça o que acontecer com o livro no meio.
+
+    O conteúdo é ordem a ordem, e não agregado por nível de preço, e a diferença é
+    substantiva. O exemplo de pegged do enunciado exibe ``150 @ 10.1`` e ``300 @ 10.1`` em
+    linhas separadas: são duas ordens no mesmo preço, e é a separação que torna a fila FIFO
+    visível na tela. Agregar mostraria ``450 @ 10.1`` e destruiria a evidência dos
+    requisitos 2 e 4 — não se veria mais quem está na frente da fila, nem o efeito de uma
+    alteração sobre a prioridade. A soma por nível existe em ``PriceLevel.total_quantity``
+    para quem precisar dela; a visualização precisa do contrário.
+    """
+
+    bids: tuple[BookEntry, ...]
+    asks: tuple[BookEntry, ...]
+
+
+type Event = Trade | OrderAccepted | BookSnapshot
 """Tudo que a engine pode devolver de um comando."""

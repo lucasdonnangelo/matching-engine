@@ -10,7 +10,7 @@ visualização do livro entram depois, sobre a mesma estrutura e sem tocar neste
 
 from __future__ import annotations
 
-from matching_engine.domain.events import Event, OrderAccepted, Trade
+from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
 from matching_engine.domain.order_book import OrderBook
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
@@ -61,6 +61,35 @@ class MatchingEngine:
     def submit_market(self, side: Side, quantity: int) -> list[Event]:
         """Insere uma market: executa a qualquer preço e descarta o que não executar."""
         return self._submit(side, None, quantity, rest=False)
+
+    def snapshot(self) -> list[Event]:
+        """Retrato do livro inteiro, dos dois lados, em ordem de prioridade.
+
+        O percurso é O(N), e essa é a única complexidade possível: a saída tem uma linha
+        por ordem viva, então produzi-la custa N. É um dos três casos em que a seção 5 do
+        contrato admite varredura, e é inerente — não há estrutura de índice que faça uma
+        listagem completa custar menos do que o tamanho dela.
+
+        Devolve uma lista de um evento só, e não o evento solto, porque a fronteira trata
+        o resultado de todo comando do mesmo jeito: uma sequência de eventos a formatar.
+        Um tipo de retorno diferente para este comando obrigaria o ``Cli`` a saber qual
+        comando produz lista e qual produz evento, que é conhecimento que ele não deve ter.
+        """
+        return [BookSnapshot(bids=self._entries(Side.BUY), asks=self._entries(Side.SELL))]
+
+    def _entries(self, side: Side) -> tuple[BookEntry, ...]:
+        """Um lado do livro achatado em entradas, do melhor preço para o pior.
+
+        A ordem sai pronta das duas iterações e não é reordenada aqui: ``BookSide`` entrega
+        os níveis em ordem de preço e ``PriceLevel`` entrega a fila em FIFO. Ordenar de
+        novo neste ponto seria duplicar — e poder contradizer — a prioridade que as duas
+        estruturas já mantêm.
+        """
+        return tuple(
+            BookEntry(quantity=order.remaining, price=level.price)
+            for level in self._book.side(side)
+            for order in level
+        )
 
     def _submit(
         self, side: Side, limit_price: Ticks | None, quantity: int, rest: bool

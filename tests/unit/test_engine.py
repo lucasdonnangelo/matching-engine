@@ -3,7 +3,7 @@ from collections.abc import Sequence
 import pytest
 
 from matching_engine.domain.engine import MatchingEngine
-from matching_engine.domain.events import Event, OrderAccepted, Trade
+from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
 from matching_engine.domain.order import Order
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
@@ -38,6 +38,12 @@ def resting(engine: MatchingEngine, side: Side, price: Ticks, quantity: int) -> 
 
 def top_of(engine: MatchingEngine, side: Side) -> Ticks | None:
     return engine.book.best_bid if side is Side.BUY else engine.book.best_ask
+
+
+def snapshot_of(engine: MatchingEngine) -> BookSnapshot:
+    [event] = engine.snapshot()
+    assert isinstance(event, BookSnapshot)
+    return event
 
 
 @pytest.mark.parametrize("side", SIDES)
@@ -291,6 +297,63 @@ def test_a_fully_filled_order_leaves_the_global_index() -> None:
     assert engine.book.get(first.order_id) is None
     assert second.order_id in engine.book
     assert len(engine.book) == 1
+
+
+def test_snapshot_of_an_empty_book_has_no_entries() -> None:
+    snapshot = snapshot_of(MatchingEngine())
+
+    assert snapshot.bids == ()
+    assert snapshot.asks == ()
+
+
+def test_snapshot_lists_both_sides_by_price_then_by_queue_position() -> None:
+    """Melhor preço primeiro, e dentro do nível a fila FIFO — duas ordens no mesmo preço
+    aparecem separadas, que é o que torna a prioridade visível."""
+    engine = MatchingEngine()
+    resting(engine, Side.BUY, Ticks(990), 100)
+    resting(engine, Side.BUY, Ticks(1000), 200)
+    resting(engine, Side.BUY, Ticks(1000), 50)
+    resting(engine, Side.SELL, Ticks(1020), 300)
+    resting(engine, Side.SELL, Ticks(1010), 100)
+
+    snapshot = snapshot_of(engine)
+
+    assert snapshot.bids == (
+        BookEntry(quantity=200, price=Ticks(1000)),
+        BookEntry(quantity=50, price=Ticks(1000)),
+        BookEntry(quantity=100, price=Ticks(990)),
+    )
+    assert snapshot.asks == (
+        BookEntry(quantity=100, price=Ticks(1010)),
+        BookEntry(quantity=300, price=Ticks(1020)),
+    )
+
+
+def test_snapshot_shows_the_remaining_quantity_not_the_original() -> None:
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 40)
+
+    snapshot = snapshot_of(engine)
+
+    assert maker.quantity == 100
+    assert snapshot.asks == (BookEntry(quantity=60, price=Ticks(2000)),)
+
+
+def test_snapshot_is_a_value_and_not_a_view_of_the_book() -> None:
+    """Formatado depois, uma vista mostraria o livro do momento da formatação."""
+    engine = MatchingEngine()
+    resting(engine, Side.SELL, Ticks(2000), 100)
+    taken = snapshot_of(engine)
+
+    engine.submit_market(Side.BUY, 100)
+    resting(engine, Side.BUY, Ticks(1000), 50)
+
+    assert taken.asks == (BookEntry(quantity=100, price=Ticks(2000)),)
+    assert taken.bids == ()
+    assert snapshot_of(engine) == BookSnapshot(
+        bids=(BookEntry(quantity=50, price=Ticks(1000)),), asks=()
+    )
 
 
 def test_an_emptied_level_leaves_the_price_index() -> None:

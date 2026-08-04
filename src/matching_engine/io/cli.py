@@ -95,7 +95,7 @@ class Cli:
             case ModifyOrder():
                 return [_not_implemented("modify order")]
             case PrintBook():
-                return [_not_implemented("print book")]
+                return format_events(self._engine.snapshot())
             case Quit():
                 self._should_quit = True
                 return []

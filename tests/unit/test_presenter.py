@@ -1,6 +1,6 @@
 import pytest
 
-from matching_engine.domain.events import Event, OrderAccepted, Trade
+from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
 from matching_engine.domain.order import OrderId
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
@@ -19,6 +19,13 @@ def trade(price: int, quantity: int, maker: int = 1, taker_side: Side = Side.BUY
 def accepted(price: int, quantity: int, side: Side = Side.BUY, order_id: int = 1) -> OrderAccepted:
     return OrderAccepted(
         order_id=OrderId(order_id), side=side, price=Ticks(price), quantity=quantity
+    )
+
+
+def book(bids: list[tuple[int, int]], asks: list[tuple[int, int]]) -> BookSnapshot:
+    return BookSnapshot(
+        bids=tuple(BookEntry(quantity=quantity, price=Ticks(price)) for quantity, price in bids),
+        asks=tuple(BookEntry(quantity=quantity, price=Ticks(price)) for quantity, price in asks),
     )
 
 
@@ -94,6 +101,91 @@ def test_aggregation_does_not_cross_another_event() -> None:
         "Trade, price: 20, qty: 10",
         "Order created: sell 40 @ 20 3",
         "Trade, price: 20, qty: 20",
+    ]
+
+
+def test_an_empty_book_prints_only_the_header_and_the_separator() -> None:
+    assert format_events([book([], [])]) == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+    ]
+
+
+def test_the_book_of_requirement_4() -> None:
+    """200 @ 10 e 100 @ 9.99 na compra, 100 @ 10.5 na venda, como o enunciado exibe."""
+    snapshot = book(bids=[(200, 1000), (100, 999)], asks=[(100, 1050)])
+
+    assert format_events([snapshot]) == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "200 @ 10         | 100 @ 10.5",
+        "100 @ 9.99       |",
+    ]
+
+
+def test_a_book_with_only_bids() -> None:
+    assert format_events([book(bids=[(200, 1000)], asks=[])]) == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "200 @ 10         |",
+    ]
+
+
+def test_a_book_with_only_asks() -> None:
+    assert format_events([book(bids=[], asks=[(100, 1050)])]) == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "                 | 100 @ 10.5",
+    ]
+
+
+def test_the_shorter_side_is_padded_until_the_table_is_rectangular() -> None:
+    snapshot = book(bids=[(200, 1000), (100, 999), (50, 998)], asks=[(100, 1050)])
+
+    assert format_events([snapshot]) == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "200 @ 10         | 100 @ 10.5",
+        "100 @ 9.99       |",
+        "50 @ 9.98        |",
+    ]
+
+
+def test_the_column_widens_to_fit_the_longest_line() -> None:
+    """Cabeçalho é o piso da largura; uma linha maior que ele empurra a coluna."""
+    snapshot = book(bids=[(1000000, 123456)], asks=[(2000000, 654321)])
+
+    assert format_events([snapshot]) == [
+        "Ordens de Compra  | Ordens de Venda",
+        "------------------|------------------",
+        "1000000 @ 1234.56 | 2000000 @ 6543.21",
+    ]
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        book([], []),
+        book(bids=[(200, 1000), (100, 999)], asks=[(100, 1050)]),
+        book(bids=[(200, 1000)], asks=[]),
+        book(bids=[], asks=[(100, 1050)]),
+        book(bids=[(1000000, 123456)], asks=[(1, 1)]),
+    ],
+)
+def test_no_line_ends_in_whitespace(snapshot: BookSnapshot) -> None:
+    """Espaço invisível quebra teste golden sem que a diferença apareça na tela."""
+    for line in format_events([snapshot]):
+        assert line == line.rstrip()
+
+
+def test_the_book_does_not_absorb_the_events_around_it() -> None:
+    events: list[Event] = [trade(2000, 100), book(bids=[(50, 1000)], asks=[])]
+
+    assert format_events(events) == [
+        "Trade, price: 20, qty: 100",
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "50 @ 10          |",
     ]
 
 
