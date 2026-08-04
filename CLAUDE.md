@@ -101,13 +101,18 @@ Toda operação preserva, e a suíte de propriedade verifica após **cada** coma
 |---|---|
 | Inserir limit passiva | O(log P) |
 | Inserir limit agressiva / market | O(log P + F), amortizado O(1) por fill |
-| Best bid / best offer | O(1) |
+| Best bid / best offer | O(log P) |
 | Cancel | O(1) esperado, + O(log P) se o nível esvaziar |
 | Amend (reduz qty) | O(1) |
 | Amend (preço ou aumenta qty) | O(log P) |
 | Reprecificar pegged | O(1) no caso comum (splice); O(K + M) no pior caso (merge) |
 | `print book` | O(N) — inerente à saída |
 | Espaço | O(N + P) |
+
+O melhor preço é O(log P), por leitura da ponta do índice ordenado. Um cache de ponteiro
+daria O(1), mas exigiria invalidação correta em toda inserção, remoção e esvaziamento de
+nível — superfície de bug permanente por um ganho que não se mede com P na casa das
+dezenas. Sub-linear satisfaz a exigência do enunciado com folga.
 
 **Varredura linear no livro é proibida**, salvo os três casos inerentes:
 impressão do livro, matching (linear no número de fills) e o merge da reprecificação
