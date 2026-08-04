@@ -8,10 +8,15 @@ preço, livro, engine — não precisa reverificar nada disso.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NewType
+from typing import TYPE_CHECKING, NewType
 
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import PegReference, Side
+
+if TYPE_CHECKING:
+    # Só para tipagem: em tempo de execução ``order_queue`` importa daqui, e o import nos
+    # dois sentidos seria circular. As anotações são strings por causa do ``__future__``.
+    from matching_engine.domain.order_queue import OrderQueue
 
 OrderId = NewType("OrderId", int)
 
@@ -62,6 +67,25 @@ class Order:
     executados é redução perante a quantidade e aumento perante o remanescente —, de
     modo que sem o valor original a regra ficaria indecidível justamente onde mais
     importa.
+
+    ``prev``, ``next`` e ``queue`` fazem da própria ordem o nó da fila do nível de preço,
+    em vez de existir um ``Node`` que a embrulhe. A escolha intrusiva custa uma alocação
+    por ordem em vez de duas, e faz o índice global ``order_id -> Order`` devolver
+    diretamente a alça necessária para remover em O(1) — sem um segundo mapa
+    ``order_id -> Node`` para manter em sincronia com o primeiro. O preço são três campos
+    estruturais na entidade, alheios ao negócio; a posse dos três é exclusiva da
+    ``OrderQueue``, que é o único ponto do sistema autorizado a lê-los ou escrevê-los.
+
+    O terceiro campo é a alça que torna as guardas de integridade da fila **totais** em
+    vez de heurísticas: com ``queue``, pertencer é um fato consultável em O(1), e não uma
+    inferência a partir do estado de ``prev`` e ``next`` — que não distingue uma ordem
+    desta fila de uma ordem no miolo de outra.
+
+    Não há ponteiro para o nível de preço. O cancelamento localiza o nível pelo índice de
+    preços em O(log P), que já é a meta de complexidade da operação, então um
+    back-pointer não compraria complexidade nenhuma — só criaria referência circular
+    entre ``Order`` e ``PriceLevel``, com mais um campo a manter coerente a cada
+    reprecificação de pegged.
     """
 
     order_id: OrderId
@@ -71,6 +95,9 @@ class Order:
     quantity: int
     remaining: int = field(init=False)
     peg_reference: PegReference | None = None
+    prev: Order | None = field(init=False, default=None, repr=False)
+    next: Order | None = field(init=False, default=None, repr=False)
+    queue: OrderQueue | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:
