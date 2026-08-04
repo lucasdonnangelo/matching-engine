@@ -28,8 +28,9 @@ src/matching_engine/
 │   ├── order.py         Order (dado + ponteiros de fila + remaining)
 │   ├── events.py        Trade, OrderAccepted, OrderCancelled, OrderAmended,
 │   │                    OrderRejected, BookSnapshot
-│   ├── order_queue.py   lista duplamente encadeada intrusiva
-│   ├── price_level.py   fila FIFO + total_qty + non_pegged_count
+│   ├── order_queue.py   lista duplamente encadeada intrusiva (append, remove e
+│   │                    alça de pertencimento em O(1))
+│   ├── price_level.py   fila FIFO + total_quantity + non_pegged_count
 │   ├── book_side.py     SortedDict[ticks -> PriceLevel], best, registro de pegged
 │   ├── order_book.py    dois BookSide + índice global de ordens
 │   └── engine.py        matching, cancel, amend, reconciliação de pegged
@@ -70,6 +71,10 @@ Violação dessas regras é motivo de rejeição em revisão.
 | Peg — reprecificação | Mantém o `sequence_id` original | Bate com o exemplo do enunciado; a perda de prioridade do requisito 4 governa alterações iniciadas pelo **cliente**, não pela engine |
 | Peg — gatilho | Reconciliação síncrona ao fim de cada comando | Observer traz reentrância; fila de eventos traz assincronia não pedida. Cada comando é atômico para o cliente |
 | Saída de trades | Domínio emite um `Trade` por par maker/taker; o presenter agrega por preço | O exemplo do enunciado agrega, mas o domínio precisa de granularidade auditável |
+| Order: identidade | `eq=False`; igualdade é por identidade, não por estrutura | `Order` é entidade mutável, identificada pelo `order_id`; duas ordens de campos idênticos são ordens diferentes |
+| Order: remaining | Não é parâmetro do construtor; nasce igual a `quantity` e só encolhe por `fill` | Nenhum caminho legítimo cria ordem já parcialmente executada; o estado inválido fica inconstruível em vez de validado |
+| Fila do nível | Lista duplamente encadeada intrusiva; a `Order` é o nó e carrega a alça para a fila dona | A operação que decide é a remoção arbitrária em O(1); a alça torna as guardas de integridade totais por comparação de identidade |
+| Idioma | Código e identificadores em inglês; mensagens de erro, livro, docstrings, ADRs e README em português. As strings literais fixadas pelo enunciado são reproduzidas exatamente como especificadas | O enunciado é bilíngue: exige `Trade, price:` e `Order cancelled` em inglês, mas o cabeçalho do livro em português |
 
 ---
 
@@ -79,7 +84,7 @@ Toda operação preserva, e a suíte de propriedade verifica após **cada** coma
 
 1. `best_bid < best_ask` — o livro nunca fica cruzado.
 2. Nenhum `PriceLevel` vazio permanece no índice de preços.
-3. `level.total_qty` == soma de `remaining` das ordens do nível.
+3. `level.total_quantity` == soma de `remaining` das ordens do nível.
 4. Toda ordem viva está no índice global **e** em exatamente um nível, ou está *parked*.
 5. Conservação: Σ quantidade executada do agressor == Σ quantidade consumida dos passivos.
 6. Toda ordem pegged está no melhor preço não-pegged do seu lado, ou *parked*.
@@ -125,6 +130,10 @@ de pegged.
 - Código e identificadores em inglês; docstrings, comentários, ADRs e README em
   português.
 - Docstrings explicam **por que**, não **o que**.
+- Exceção de domínio derivada de `ValueError` (`InvalidPriceError`, `InvalidOrderError`)
+  sinaliza entrada inválida do usuário; derivada de `RuntimeError`
+  (`QueueIntegrityError`, `LevelIntegrityError`) sinaliza inconsistência interna da
+  engine — comando malformado nunca chega a elas.
 
 ---
 
