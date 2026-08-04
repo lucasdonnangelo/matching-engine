@@ -23,6 +23,3 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
-
-# Agent instructions (local only)
-CLAUDE.md
