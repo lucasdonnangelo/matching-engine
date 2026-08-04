@@ -1,5 +1,7 @@
 # Matching Engine
 
+[![CI](https://github.com/lucasdonnangelo/matching-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasdonnangelo/matching-engine/actions/workflows/ci.yml)
+
 Motor de casamento de ordens para ativo único, com prioridade preço-tempo, suportando ordens
 limit, market e pegged, além de cancelamento e alteração de ordens.
 
