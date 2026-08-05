@@ -29,6 +29,15 @@ def accepted(price: int, quantity: int, side: Side = Side.BUY, order_id: int = 1
     )
 
 
+def cancelled(order_id: int = 1, price: int | None = 1050, remaining: int = 7) -> OrderCancelled:
+    return OrderCancelled(
+        order_id=OrderId(order_id),
+        side=Side.SELL,
+        price=None if price is None else Ticks(price),
+        remaining=remaining,
+    )
+
+
 def book(bids: list[tuple[int, int]], asks: list[tuple[int, int]]) -> BookSnapshot:
     return BookSnapshot(
         bids=tuple(BookEntry(quantity=quantity, price=Ticks(price)) for quantity, price in bids),
@@ -202,6 +211,35 @@ def test_the_book_does_not_absorb_the_events_around_it() -> None:
 
     assert format_events(events) == [
         "Trade, price: 20, qty: 100",
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "50 @ 10          |",
+    ]
+
+
+def test_every_event_type_closes_the_pending_run_of_trades() -> None:
+    """Trades separados por qualquer outro evento não se fundem, e a cronologia se mantém.
+
+    Os três trades têm o mesmo preço de propósito: fundissem-se, o resultado seria uma
+    linha só de 60, ou três linhas fora da ordem em que os eventos chegaram. É a
+    propriedade que o guard único antes do ``match`` garante para todo evento — inclusive
+    os que ainda não existem.
+    """
+    events: list[Event] = [
+        trade(2000, 10),
+        accepted(999, 50, side=Side.BUY, order_id=4),
+        trade(2000, 20),
+        cancelled(order_id=5),
+        trade(2000, 30),
+        book(bids=[(50, 1000)], asks=[]),
+    ]
+
+    assert format_events(events) == [
+        "Trade, price: 20, qty: 10",
+        "Order created: buy 50 @ 9.99 4",
+        "Trade, price: 20, qty: 20",
+        "Order cancelled",
+        "Trade, price: 20, qty: 30",
         "Ordens de Compra | Ordens de Venda",
         "-----------------|----------------",
         "50 @ 10          |",

@@ -56,12 +56,25 @@ def format_events(events: Sequence[Event]) -> list[str]:
     A fusão também não atravessa um evento de outro tipo, pelo mesmo motivo: entre dois
     trades de preço igual pode haver uma ordem aceita, e a ordem dos acontecimentos é o
     que a saída relata.
+
+    Esse fechamento é um guard **único**, antes do ``match``, e não uma linha repetida em
+    cada ramo. A repetição funcionava, mas deixava a corretude por conta da memória de quem
+    escrevesse o próximo ramo: ``assert_never`` obriga a tratar todo evento novo, e não tem
+    como obrigar a fechar o run pendente dentro do ramo tratado. O esquecimento não
+    quebraria a build nem estouraria em teste algum — produziria uma linha de trade fora da
+    ordem cronológica, saída plausível e errada, que é a espécie mais cara de diagnosticar.
+    Com o guard único, a regra "todo evento que não é ``Trade`` fecha o run" vale para o
+    evento novo por construção, e o ramo cuida só da própria formatação.
     """
     lines: list[str] = []
     pending_price: Ticks | None = None
     pending_quantity = 0
 
     for event in events:
+        if not isinstance(event, Trade) and pending_price is not None:
+            lines.append(_trade_line(pending_price, pending_quantity))
+            pending_price, pending_quantity = None, 0
+
         match event:
             case Trade():
                 if pending_price is not None and pending_price != event.price:
@@ -70,19 +83,10 @@ def format_events(events: Sequence[Event]) -> list[str]:
                 pending_price = event.price
                 pending_quantity += event.quantity
             case OrderAccepted():
-                if pending_price is not None:
-                    lines.append(_trade_line(pending_price, pending_quantity))
-                    pending_price, pending_quantity = None, 0
                 lines.append(_accepted_line(event))
             case OrderCancelled():
-                if pending_price is not None:
-                    lines.append(_trade_line(pending_price, pending_quantity))
-                    pending_price, pending_quantity = None, 0
                 lines.append(_CANCELLED_LINE)
             case BookSnapshot():
-                if pending_price is not None:
-                    lines.append(_trade_line(pending_price, pending_quantity))
-                    pending_price, pending_quantity = None, 0
                 lines.extend(_book_lines(event))
             case _:
                 assert_never(event)
