@@ -1,6 +1,13 @@
 import pytest
 
-from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
+from matching_engine.domain.events import (
+    BookEntry,
+    BookSnapshot,
+    Event,
+    OrderAccepted,
+    OrderCancelled,
+    Trade,
+)
 from matching_engine.domain.order import OrderId
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
@@ -102,6 +109,18 @@ def test_aggregation_does_not_cross_another_event() -> None:
         "Order created: sell 40 @ 20 3",
         "Trade, price: 20, qty: 20",
     ]
+
+
+@pytest.mark.parametrize(
+    "price",
+    [Ticks(1000), None],
+    ids=["ordem no livro", "pegged parked, sem preço"],
+)
+def test_a_cancellation_is_always_the_same_fixed_line(price: Ticks | None) -> None:
+    """O enunciado fixa a linha inteira; id, lado e remanescente ficam só no evento."""
+    event = OrderCancelled(order_id=OrderId(7), side=Side.BUY, price=price, remaining=50)
+
+    assert format_events([event]) == ["Order cancelled"]
 
 
 def test_an_empty_book_prints_only_the_header_and_the_separator() -> None:

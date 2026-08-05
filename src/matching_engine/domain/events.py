@@ -79,6 +79,28 @@ class OrderAccepted:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderCancelled:
+    """Ordem retirada do livro a pedido do cliente, antes de executar por inteiro.
+
+    ``remaining`` é o remanescente no instante do cancelamento, isto é, a liquidez que saiu
+    do livro. Ele não aparece na saída: o enunciado fixa ``Order cancelled`` como linha
+    inteira, sem id e sem quantidade. Está aqui porque é o que torna o evento auditável —
+    sem ele, o histórico registra que algo foi cancelado sem dizer o que deixou de estar
+    disponível, e a conservação de quantidade entre o que entrou e o que saiu do livro
+    deixa de fechar. O evento serve ao domínio; o que a tela mostra é recorte do presenter.
+
+    ``price`` é opcional porque uma ordem pegged *parked* pode ser cancelada sem nunca ter
+    tido preço — ela espera referência fora dos dois lados do livro, e cancelar é
+    justamente uma das coisas que o cliente pode querer fazer com ela enquanto espera.
+    """
+
+    order_id: OrderId
+    side: Side
+    price: Ticks | None
+    remaining: int
+
+
+@dataclass(frozen=True, slots=True)
 class BookEntry:
     """Uma ordem viva na visualização do livro: o que resta dela, ao preço em que está.
 
@@ -113,5 +135,5 @@ class BookSnapshot:
     asks: tuple[BookEntry, ...]
 
 
-type Event = Trade | OrderAccepted | BookSnapshot
+type Event = Trade | OrderAccepted | OrderCancelled | BookSnapshot
 """Tudo que a engine pode devolver de um comando."""

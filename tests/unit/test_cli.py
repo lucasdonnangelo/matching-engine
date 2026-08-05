@@ -166,7 +166,6 @@ def test_an_internal_runtime_error_is_not_swallowed() -> None:
         # o peg cruzado também para aqui: a lateralidade é do domínio, que ainda não é
         # alcançado por este comando
         ("peg bid sell 100", "peg"),
-        ("cancel order 1", "cancel order"),
         ("modify order 1 qty 5", "modify order"),
         ("modify order 1 price 10", "modify order"),
     ],
@@ -175,6 +174,27 @@ def test_the_commands_that_are_not_implemented_yet_name_themselves(line: str, na
     cli = Cli(MatchingEngine())
 
     assert cli.execute(line) == [f"Error: comando ainda não implementado: {name}"]
+
+
+def test_create_then_cancel_as_the_statement_shows() -> None:
+    cli = Cli(MatchingEngine())
+
+    assert cli.execute("limit buy 10 100") == ["Order created: buy 100 @ 10 1"]
+    assert cli.execute("cancel order 1") == ["Order cancelled"]
+    assert cli.execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+    ]
+
+
+def test_cancelling_an_unknown_id_is_an_error_line() -> None:
+    cli = Cli(MatchingEngine())
+
+    lines = cli.execute("cancel order 999")
+
+    assert len(lines) == 1
+    assert lines[0].startswith("Error: ")
+    assert "999" in lines[0]
 
 
 def test_print_book_shows_the_book() -> None:

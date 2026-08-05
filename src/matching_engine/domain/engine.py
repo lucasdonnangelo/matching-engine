@@ -10,10 +10,32 @@ visualização do livro entram depois, sobre a mesma estrutura e sem tocar neste
 
 from __future__ import annotations
 
-from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
+from matching_engine.domain.events import (
+    BookEntry,
+    BookSnapshot,
+    Event,
+    OrderAccepted,
+    OrderCancelled,
+    Trade,
+)
+from matching_engine.domain.order import OrderId
 from matching_engine.domain.order_book import OrderBook
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
+
+
+class OrderNotFoundError(ValueError):
+    """Comando que se refere a uma ordem que não está viva no livro.
+
+    ``ValueError`` pelo critério da seção 6 do contrato: é o usuário errando o número da
+    ordem — digitou um id que nunca existiu, ou um que já saiu do livro —, e a sessão
+    continua depois de uma linha de erro.
+
+    ``BookIntegrityError`` é ``RuntimeError`` e significa o oposto: lá o id foi encontrado,
+    mas o índice global e os níveis de preço discordam entre si sobre o que o livro tem.
+    Um é engano de quem digita; o outro é a engine tendo perdido a conta de si mesma, e por
+    isso um vira mensagem e o outro derruba a sessão.
+    """
 
 
 class MatchingEngine:
@@ -61,6 +83,36 @@ class MatchingEngine:
     def submit_market(self, side: Side, quantity: int) -> list[Event]:
         """Insere uma market: executa a qualquer preço e descarta o que não executar."""
         return self._submit(side, None, quantity, rest=False)
+
+    def cancel(self, order_id: OrderId) -> list[Event]:
+        """Retira do livro a ordem viva daquele id. O(1) esperado, O(log P) se o nível esvaziar.
+
+        O evento é montado **antes** da remoção porque depois dela a ordem está desligada:
+        ``OrderQueue.remove`` zera os ponteiros de fila, e o que o evento relata é o estado
+        do instante em que a ordem ainda estava no livro. Ler os campos depois seria relatar
+        o depois de um acontecimento que é justamente o antes.
+
+        Limitação conhecida: uma ordem totalmente executada é **indistinguível** de um id
+        que nunca existiu, porque as duas coisas dão a mesma resposta no índice global —
+        ausência. Separá-las exigiria um cemitério de ordens mortas, isto é, estado morto
+        mantido vivo para melhorar o texto de uma mensagem de erro, com custo de memória
+        proporcional ao histórico da sessão. A mensagem enumera as três hipóteses em vez de
+        escolher uma que a engine não tem como confirmar.
+        """
+        order = self._book.get(order_id)
+        if order is None:
+            raise OrderNotFoundError(
+                f"ordem {order_id} não está no livro (id inexistente, já cancelada ou já executada)"
+            )
+
+        cancelled = OrderCancelled(
+            order_id=order.order_id,
+            side=order.side,
+            price=order.price,
+            remaining=order.remaining,
+        )
+        self._book.remove(order)
+        return [cancelled]
 
     def snapshot(self) -> list[Event]:
         """Retrato do livro inteiro, dos dois lados, em ordem de prioridade.

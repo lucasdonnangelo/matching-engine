@@ -90,8 +90,8 @@ class Cli:
                 return format_events(self._engine.submit_market(side, quantity))
             case SubmitPegged():
                 return [_not_implemented("peg")]
-            case CancelOrder():
-                return [_not_implemented("cancel order")]
+            case CancelOrder(order_id=order_id):
+                return format_events(self._engine.cancel(order_id))
             case ModifyOrder():
                 return [_not_implemented("modify order")]
             case PrintBook():

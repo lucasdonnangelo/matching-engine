@@ -2,9 +2,16 @@ from collections.abc import Sequence
 
 import pytest
 
-from matching_engine.domain.engine import MatchingEngine
-from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
-from matching_engine.domain.order import Order
+from matching_engine.domain.engine import MatchingEngine, OrderNotFoundError
+from matching_engine.domain.events import (
+    BookEntry,
+    BookSnapshot,
+    Event,
+    OrderAccepted,
+    OrderCancelled,
+    Trade,
+)
+from matching_engine.domain.order import Order, OrderId
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.side import Side
 
@@ -297,6 +304,134 @@ def test_a_fully_filled_order_leaves_the_global_index() -> None:
     assert engine.book.get(first.order_id) is None
     assert second.order_id in engine.book
     assert len(engine.book) == 1
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_cancel_takes_the_order_out_of_the_whole_book(side: Side) -> None:
+    engine = MatchingEngine()
+    order = resting(engine, side, Ticks(1000), 100)
+
+    events = engine.cancel(order.order_id)
+
+    assert events == [
+        OrderCancelled(order_id=order.order_id, side=side, price=Ticks(1000), remaining=100)
+    ]
+    assert order.order_id not in engine.book
+    assert engine.book.side(side).level_at(Ticks(1000)) is None
+    assert engine.book.side(side).is_empty
+    assert top_of(engine, side) is None
+    assert len(engine.book) == 0
+
+
+def test_cancel_keeps_a_level_that_still_has_orders_and_its_queue() -> None:
+    engine = MatchingEngine()
+    first = resting(engine, Side.SELL, Ticks(2000), 100)
+    second = resting(engine, Side.SELL, Ticks(2000), 200)
+    third = resting(engine, Side.SELL, Ticks(2000), 300)
+
+    engine.cancel(first.order_id)
+
+    level = engine.book.side(Side.SELL).level_at(Ticks(2000))
+    assert level is not None
+    assert level.head is second
+    assert list(level) == [second, third]
+    assert level.total_quantity == 500
+    assert len(engine.book) == 2
+    assert engine.book.best_ask == 2000
+
+
+@pytest.mark.parametrize(
+    ("side", "top", "next_price"),
+    [(Side.BUY, Ticks(1000), Ticks(990)), (Side.SELL, Ticks(1000), Ticks(1010))],
+)
+def test_cancelling_the_top_promotes_the_next_price(
+    side: Side, top: Ticks, next_price: Ticks
+) -> None:
+    engine = MatchingEngine()
+    best = resting(engine, side, top, 100)
+    resting(engine, side, next_price, 100)
+
+    engine.cancel(best.order_id)
+
+    assert top_of(engine, side) == next_price
+    assert len(engine.book.side(side)) == 1
+
+
+def test_cancel_reports_the_remaining_quantity_not_the_original() -> None:
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 40)
+
+    events = engine.cancel(maker.order_id)
+
+    assert maker.quantity == 100
+    assert events == [
+        OrderCancelled(order_id=maker.order_id, side=Side.SELL, price=Ticks(2000), remaining=60)
+    ]
+
+
+def test_cancelling_an_unknown_id_is_rejected() -> None:
+    engine = MatchingEngine()
+
+    with pytest.raises(OrderNotFoundError, match="não está no livro"):
+        engine.cancel(OrderId(999))
+
+
+def test_cancelling_twice_is_rejected() -> None:
+    engine = MatchingEngine()
+    order = resting(engine, Side.BUY, Ticks(1000), 100)
+    engine.cancel(order.order_id)
+
+    with pytest.raises(OrderNotFoundError):
+        engine.cancel(order.order_id)
+
+
+def test_cancelling_a_fully_executed_order_is_rejected() -> None:
+    """Limitação conhecida: executada e inexistente dão a mesma ausência no índice."""
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 100)
+
+    with pytest.raises(OrderNotFoundError):
+        engine.cancel(maker.order_id)
+
+
+def test_order_not_found_error_is_a_value_error() -> None:
+    """Errar o número da ordem é entrada inválida, não inconsistência interna da engine."""
+    assert issubclass(OrderNotFoundError, ValueError)
+    assert not issubclass(OrderNotFoundError, RuntimeError)
+
+
+def test_cancelling_everything_returns_the_book_to_the_initial_state() -> None:
+    engine = MatchingEngine()
+    orders = [
+        resting(engine, Side.BUY, Ticks(1000), 100),
+        resting(engine, Side.BUY, Ticks(990), 100),
+        resting(engine, Side.SELL, Ticks(1010), 100),
+        resting(engine, Side.SELL, Ticks(1020), 100),
+    ]
+
+    for order in orders:
+        engine.cancel(order.order_id)
+
+    assert len(engine.book) == 0
+    assert engine.book.best_bid is None
+    assert engine.book.best_ask is None
+    assert engine.book.side(Side.BUY).is_empty
+    assert engine.book.side(Side.SELL).is_empty
+
+
+def test_a_cancelled_order_no_longer_matches() -> None:
+    """A liquidez saiu do livro: a agressiva que a teria atingido repousa em vez de executar."""
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.cancel(maker.order_id)
+
+    events = engine.submit_limit(Side.BUY, Ticks(2000), 100)
+
+    assert trades_of(events) == []
+    assert len(acceptances_of(events)) == 1
+    assert engine.book.best_bid == 2000
 
 
 def test_snapshot_of_an_empty_book_has_no_entries() -> None:

@@ -22,11 +22,25 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Final, assert_never
 
-from matching_engine.domain.events import BookEntry, BookSnapshot, Event, OrderAccepted, Trade
+from matching_engine.domain.events import (
+    BookEntry,
+    BookSnapshot,
+    Event,
+    OrderAccepted,
+    OrderCancelled,
+    Trade,
+)
 from matching_engine.domain.price import Ticks, format_price
 
 _BIDS_HEADER: Final = "Ordens de Compra"
 _ASKS_HEADER: Final = "Ordens de Venda"
+
+_CANCELLED_LINE: Final = "Order cancelled"
+"""Linha inteira, fixada pelo enunciado: sem id, sem quantidade, sem lado.
+
+O evento carrega os três, e a escolha de não mostrá-los é do presenter — que é onde as
+decisões de apresentação são reversíveis.
+"""
 
 
 def format_events(events: Sequence[Event]) -> list[str]:
@@ -60,6 +74,11 @@ def format_events(events: Sequence[Event]) -> list[str]:
                     lines.append(_trade_line(pending_price, pending_quantity))
                     pending_price, pending_quantity = None, 0
                 lines.append(_accepted_line(event))
+            case OrderCancelled():
+                if pending_price is not None:
+                    lines.append(_trade_line(pending_price, pending_quantity))
+                    pending_price, pending_quantity = None, 0
+                lines.append(_CANCELLED_LINE)
             case BookSnapshot():
                 if pending_price is not None:
                     lines.append(_trade_line(pending_price, pending_quantity))
