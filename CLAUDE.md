@@ -105,7 +105,7 @@ Toda operação preserva, e a suíte de propriedade verifica após **cada** coma
 | Cancel | O(1) esperado, + O(log P) se o nível esvaziar |
 | Amend (reduz qty) | O(1) |
 | Amend (preço ou aumenta qty) | O(log P) |
-| Reprecificar pegged | O(1) no caso comum (splice); O(K + M) no pior caso (merge) |
+| Reprecificar pegged | O(K) no caso comum; O(K + M) quando há intercalação real |
 | `print book` | O(N) — inerente à saída |
 | Espaço | O(N + P) |
 
@@ -114,9 +114,21 @@ daria O(1), mas exigiria invalidação correta em toda inserção, remoção e e
 nível — superfície de bug permanente por um ganho que não se mede com P na casa das
 dezenas. Sub-linear satisfaz a exigência do enunciado com folga.
 
-**Varredura linear no livro é proibida**, salvo os três casos inerentes:
-impressão do livro, matching (linear no número de fills) e o merge da reprecificação
-de pegged.
+**Varredura linear no livro é proibida**, salvo três exceções — e elas não são da mesma
+natureza.
+
+Duas são **inerentes**, sem alternativa possível: a impressão do livro produz uma linha
+por ordem viva, e o matching é linear no número de fills, que é o mínimo para executá-los.
+Nenhuma estrutura de dados faz melhor, porque o custo é o do próprio resultado.
+
+A terceira é **admitida por escolha**: o merge da reprecificação de pegged. Existe
+alternativa de custo menor — mandar as pegged para o fim da fila do nível de destino, O(K)
+sempre —, e ela foi descartada por contradizer o exemplo do enunciado, no qual a pegged
+reprecificada aparece **acima** da limit que provocou a mudança. O linear aqui é o preço de
+uma decisão de negócio, não um limite de estrutura de dados, e é cobrado com parcimônia: o
+termo M só aparece quando o topo muda por cancelamento, revelando um nível preexistente
+cujas ordens são mais antigas que parte das pegged. No caso comum, o cursor da fila de
+destino não avança e o custo já é O(K).
 
 ---
 

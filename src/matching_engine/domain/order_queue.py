@@ -94,6 +94,105 @@ class OrderQueue:
         self._tail = order
         self._size += 1
 
+    def merge_ordered(self, orders: list[Order]) -> None:
+        """Insere um bloco já ordenado por ``sequence_id``, mantendo a fila ordenada. O(K + M).
+
+        É a operação de que a reprecificação de pegged precisa e que ``append`` não faz. Uma
+        pegged reprecificada **mantém** o ``sequence_id`` original — decisão da seção 3 do
+        contrato, porque a mudança de preço partiu da engine e não do cliente, e a perda de
+        prioridade do requisito 4 pune alteração pedida pelo cliente. Só que o nível de
+        destino tem a sua própria fila, e enfileirar pelo fim colocaria uma ordem antiga
+        atrás de ordens mais novas: a fila deixaria de estar ordenada por ``sequence_id``,
+        que é o único critério de prioridade temporal que o livro tem, e o desempate entre
+        duas ordens do mesmo preço passaria a depender de por qual caminho cada uma chegou
+        ao nível. Daí a inserção que já entra no lugar certo.
+
+        **A alternativa era mandar as pegged para o fim da fila**, O(K) sempre, e dispensaria
+        este método inteiro. Ela contradiz o exemplo do enunciado: lá a pegged reprecificada
+        aparece **acima** da limit que provocou a mudança de preço, e não abaixo dela. E faz
+        sentido que apareça — a pegged já estava no livro quando a limit chegou, e
+        reprecificar não é reenviar.
+
+        **O caso comum já sai barato do laço geral, e é por isso que não há um ramo para
+        ele.** Quando o topo do lado melhora porque chegou uma limit nova, o nível de destino
+        é o dela, e todas as pegged — que estavam no livro antes — são mais antigas do que
+        qualquer ordem que ele guarde. Nessa forma dos dados a comparação com o cursor falha
+        já na primeira tentativa de cada ordem do bloco, o cursor não anda uma casa sequer, e
+        cada pegged entra em O(1) logo atrás da anterior: **O(K), independente do tamanho da
+        fila que recebe**. Não é otimização a acrescentar, é o que este laço faz sozinho — o
+        que um ramo dedicado compraria é fator constante, ao preço de um segundo caminho
+        para testar e manter.
+
+        **O M só aparece quando o topo muda por cancelamento.** Aí o preço que as pegged
+        passam a acompanhar não é o de uma ordem recém-chegada, é o de um nível que já estava
+        no livro, escondido atrás do que foi cancelado, e as ordens dele podem ser mais
+        antigas do que parte das pegged. É a intercalação de verdade: o cursor percorre a
+        fila de destino uma vez, e só aí se paga O(K + M).
+
+        **É o único custo linear não inerente do sistema.** Dos três casos que a seção 5
+        admite, os outros dois não têm como custar menos: imprimir o livro tem uma linha por
+        ordem viva, e o matching tem uma operação por execução. Este tem — bastaria abrir mão
+        da prioridade preservada da pegged. O linear aqui é o preço de uma decisão de
+        negócio, não uma limitação de estrutura de dados, e por isso fica confinado a um
+        método só, cobrado apenas quando o topo muda por cancelamento.
+
+        A correção depende de a fila **já** estar ordenada por ``sequence_id``, e ela está:
+        ``append`` enfileira em FIFO sobre um contador monotônico, o amend que renova
+        prioridade recebe um número novo e maior antes de voltar pelo fim, e este método
+        preserva a ordem que encontra. Conferir isso a cada chamada custaria O(M) mesmo
+        quando o cursor não sai do lugar, isto é, cobraria o M justamente no caso em que o
+        algoritmo não precisa dele.
+
+        As duas guardas cobrem a lista inteira **antes** de qualquer religação, e não ordem a
+        ordem durante a inserção: um bloco recusado no meio deixaria parte das ordens já
+        enfileiradas e a outra parte solta, com a fila ordenada por acidente ou não conforme
+        onde a recusa caísse. Quem monta a lista é a engine, então lista fora de ordem ou com
+        ordem ainda ligada a outra fila é bug dela, não comando malformado.
+        """
+        if not orders:
+            return
+
+        previous: Order | None = None
+        for order in orders:
+            if order.queue is not None:
+                raise QueueIntegrityError(f"ordem {order.order_id} já está ligada a uma fila")
+            if previous is not None and order.sequence_id <= previous.sequence_id:
+                raise QueueIntegrityError(
+                    f"bloco fora de ordem: a ordem {order.order_id}, de sequência "
+                    f"{order.sequence_id}, vem depois da ordem {previous.order_id}, de "
+                    f"sequência {previous.sequence_id}"
+                )
+            previous = order
+
+        current: Order | None = self._head
+        for order in orders:
+            while current is not None and current.sequence_id < order.sequence_id:
+                current = current.next
+            if current is None:
+                # A fila acabou antes do bloco: daqui para a frente todas as ordens são as
+                # mais novas de tudo, e ``append`` já é exatamente essa inserção.
+                self.append(order)
+            else:
+                self._link_before(order, current)
+
+    def _link_before(self, order: Order, node: Order) -> None:
+        """Insere ``order`` imediatamente antes de ``node``, que já está nesta fila. O(1).
+
+        Nunca mexe em ``_tail``: ``node`` continua na fila e depois de ``order``, então a
+        cauda é a mesma. O caso em que a cauda muda é o da inserção no fim, e ele é de
+        ``append``.
+        """
+        previous = node.prev
+        order.queue = self
+        order.prev = previous
+        order.next = node
+        node.prev = order
+        if previous is None:
+            self._head = order
+        else:
+            previous.next = order
+        self._size += 1
+
     def remove(self, order: Order) -> None:
         """Desliga a ordem e religa seus vizinhos entre si. O(1).
 

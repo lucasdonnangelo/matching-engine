@@ -50,6 +50,35 @@ def assert_queue_is(queue: OrderQueue, expected: list[Order]) -> None:
     assert backward == list(reversed(expected))
 
 
+def queue_of(sequence_ids: list[int]) -> tuple[OrderQueue, list[Order]]:
+    """Fila com estes ``sequence_id``, enfileirados na ordem dada — que é a ordem de chegada."""
+    queue = OrderQueue()
+    orders = [make_order(sequence_id) for sequence_id in sequence_ids]
+    for order in orders:
+        queue.append(order)
+    return queue, orders
+
+
+def block_of(sequence_ids: list[int]) -> list[Order]:
+    """Bloco solto, como a engine o monta: ordens desligadas de qualquer fila."""
+    return [make_order(sequence_id) for sequence_id in sequence_ids]
+
+
+def by_sequence(*groups: list[Order]) -> list[Order]:
+    """A ordem que o merge tem de produzir: tudo junto, por ``sequence_id`` crescente."""
+    return sorted([order for group in groups for order in group], key=lambda o: o.sequence_id)
+
+
+def sequence_ids_of(queue: OrderQueue) -> list[int]:
+    return [order.sequence_id for order in queue]
+
+
+def assert_merged_into(queue: OrderQueue, expected: list[Order]) -> None:
+    """``assert_queue_is`` mais a alça de cada ordem, que o merge escreve fora de ``append``."""
+    assert_queue_is(queue, expected)
+    assert [order.queue for order in expected] == [queue] * len(expected)
+
+
 def test_empty_queue() -> None:
     assert_queue_is(OrderQueue(), [])
 
@@ -267,6 +296,175 @@ def test_queue_integrity_error_is_a_runtime_error() -> None:
     """Violação aqui é bug da engine, não entrada inválida do usuário."""
     assert issubclass(QueueIntegrityError, RuntimeError)
     assert not issubclass(QueueIntegrityError, ValueError)
+
+
+def test_merge_into_an_empty_queue() -> None:
+    queue = OrderQueue()
+    block = block_of([1, 2, 3])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, block)
+
+
+@pytest.mark.parametrize("size", [0, 1, 3], ids=["fila vazia", "fila unitária", "fila cheia"])
+def test_merge_of_an_empty_block_leaves_the_queue_alone(size: int) -> None:
+    queue, orders = make_queue(size)
+
+    queue.merge_ordered([])
+
+    assert_queue_is(queue, orders)
+
+
+def test_merge_of_a_block_older_than_the_head_goes_to_the_front() -> None:
+    """O caso comum: o topo melhorou porque chegou uma limit nova, e as pegged vêm de antes."""
+    queue, orders = queue_of([10, 11, 12])
+    block = block_of([1, 2, 3])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, block + orders)
+    assert sequence_ids_of(queue) == [1, 2, 3, 10, 11, 12]
+
+
+def test_merge_interleaves_by_sequence_id() -> None:
+    """O caso do cancelamento: o nível revelado é antigo, e as duas filas se intercalam."""
+    queue, orders = queue_of([10, 20, 30, 40])
+    block = block_of([5, 15, 35, 50])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, by_sequence(orders, block))
+    assert sequence_ids_of(queue) == [5, 10, 15, 20, 30, 35, 40, 50]
+
+
+def test_merge_of_a_block_newer_than_the_tail_goes_to_the_end() -> None:
+    queue, orders = queue_of([1, 2, 3])
+    block = block_of([10, 11])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, orders + block)
+    assert sequence_ids_of(queue) == [1, 2, 3, 10, 11]
+
+
+@pytest.mark.parametrize("sequence_id", [5, 15, 35], ids=["frente", "meio", "fim"])
+def test_merge_of_a_single_order_lands_in_its_place(sequence_id: int) -> None:
+    queue, orders = queue_of([10, 20, 30])
+    block = block_of([sequence_id])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, by_sequence(orders, block))
+
+
+def test_merge_before_the_head_and_after_the_tail_at_once() -> None:
+    """As duas pontas na mesma chamada: a cabeça é substituída e a cauda é estendida."""
+    queue, orders = queue_of([10, 20])
+    block = block_of([5, 30])
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, by_sequence(orders, block))
+    assert sequence_ids_of(queue) == [5, 10, 20, 30]
+
+
+@pytest.mark.parametrize(
+    ("resident_ids", "block_ids"),
+    [([], [1, 2]), ([10, 20], [1, 2]), ([10, 20], [5, 15])],
+    ids=["fila vazia", "bloco todo anterior", "bloco intercalado"],
+)
+def test_append_after_a_merge_lands_at_the_end(
+    resident_ids: list[int], block_ids: list[int]
+) -> None:
+    """A cauda tem de sobreviver ao merge nas três formas, e só um ``append`` posterior a expõe."""
+    queue, orders = queue_of(resident_ids)
+    block = block_of(block_ids)
+    queue.merge_ordered(block)
+    latest = make_order(99)
+
+    queue.append(latest)
+
+    assert_merged_into(queue, [*by_sequence(orders, block), latest])
+
+
+def test_merged_orders_can_be_removed_afterwards() -> None:
+    """A remoção desfaz os elos que o merge fez: é ela que cobra um ``prev`` mal escrito."""
+    queue, orders = queue_of([10, 20, 30])
+    block = block_of([5, 15, 35])
+    queue.merge_ordered(block)
+
+    for order in block:
+        queue.remove(order)
+
+    assert_queue_is(queue, orders)
+    assert [order.queue for order in block] == [None, None, None]
+
+
+@pytest.mark.parametrize("position", [0, 1], ids=["primeira do bloco", "última do bloco"])
+def test_merge_rejects_a_block_with_an_order_from_this_queue(position: int) -> None:
+    queue, orders = queue_of([1, 3])
+    fresh = make_order(2)
+    block = [orders[0], fresh] if position == 0 else [fresh, orders[1]]
+
+    with pytest.raises(QueueIntegrityError, match="já está ligada"):
+        queue.merge_ordered(block)
+
+    assert_queue_is(queue, orders)  # a operação recusada não deixa rastro
+    assert fresh.queue is None
+
+
+def test_merge_rejects_a_block_with_an_order_from_another_queue() -> None:
+    queue, orders = queue_of([10, 20])
+    other, other_orders = queue_of([5])
+    fresh = make_order(7)
+
+    with pytest.raises(QueueIntegrityError, match="já está ligada"):
+        queue.merge_ordered([other_orders[0], fresh])
+
+    assert_queue_is(queue, orders)
+    assert_queue_is(other, other_orders)
+    assert fresh.queue is None
+
+
+@pytest.mark.parametrize(
+    "sequence_ids",
+    [[3, 1, 2], [1, 3, 2], [2, 1], [1, 1]],
+    ids=["fora de ordem na frente", "fora de ordem no fim", "invertido", "sequência repetida"],
+)
+def test_merge_rejects_a_block_that_is_not_ordered(sequence_ids: list[int]) -> None:
+    """Quem monta o bloco é a engine: lista fora de ordem é bug dela, não entrada do usuário."""
+    queue, orders = queue_of([10, 20, 30])
+    block = block_of(sequence_ids)
+
+    with pytest.raises(QueueIntegrityError, match="fora de ordem"):
+        queue.merge_ordered(block)
+
+    assert_queue_is(queue, orders)
+    assert [order.queue for order in block] == [None] * len(block)
+
+
+def test_a_rejected_merge_leaves_no_order_of_the_block_enqueued() -> None:
+    """A validação é do bloco inteiro antes de qualquer religação, e não ordem a ordem."""
+    queue, orders = queue_of([10, 20])
+    block = block_of([1, 2, 9, 3])  # a quebra está no fim, depois de três ordens válidas
+
+    with pytest.raises(QueueIntegrityError, match="fora de ordem"):
+        queue.merge_ordered(block)
+
+    assert_queue_is(queue, orders)
+    assert [order.queue for order in block] == [None] * 4
+
+
+def test_long_merge_keeps_the_global_sequence_order() -> None:
+    """Intercalação de mil ordens: desvio de um elo só embaralha a fila e o percurso reverso."""
+    queue, orders = queue_of(list(range(2, 1001, 2)))
+    block = block_of(list(range(1, 1000, 2)))
+
+    queue.merge_ordered(block)
+
+    assert_merged_into(queue, by_sequence(orders, block))
+    assert sequence_ids_of(queue) == list(range(1, 1001))
 
 
 def test_long_queue_keeps_order_and_size() -> None:
