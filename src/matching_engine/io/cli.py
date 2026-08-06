@@ -92,8 +92,8 @@ class Cli:
                 return [_not_implemented("peg")]
             case CancelOrder(order_id=order_id):
                 return format_events(self._engine.cancel(order_id))
-            case ModifyOrder():
-                return [_not_implemented("modify order")]
+            case ModifyOrder(order_id=order_id, price=price, quantity=quantity):
+                return format_events(self._engine.amend(order_id, price, quantity))
             case PrintBook():
                 return format_events(self._engine.snapshot())
             case Quit():

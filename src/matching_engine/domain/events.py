@@ -101,6 +101,35 @@ class OrderCancelled:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderAmended:
+    """Ordem alterada a pedido do cliente, com o que ficou no livro depois da alteração.
+
+    ``quantity`` é o que repousa agora, pela mesma razão de ``OrderAccepted``: um amend que
+    torna a ordem marketable executa parte contra o lado oposto, e os ``Trade`` que
+    precedem este evento na mesma lista já relatam essa parte. Repetir aqui a quantidade
+    pedida contaria a mesma quantidade duas vezes.
+
+    ``price`` não é opcional porque o evento relata uma ordem que ficou no livro, e o livro
+    é indexado por preço — uma ordem inteiramente executada pelo amend não produz este
+    evento, produz só os seus ``Trade``.
+
+    ``priority_renewed`` registra se a ordem perdeu o lugar na fila. Não aparece na saída, e
+    está aqui porque é o que torna o evento auditável: sem ele, dois amends de efeito oposto
+    sobre a fila ficariam indistinguíveis no histórico. Uma ordem de 300 reduzida para 200 e
+    uma de 100 aumentada para 200 emitem o mesmo lado, o mesmo preço e a mesma quantidade, e
+    só a segunda foi para o fim da fila — a pergunta "por que esta ordem executou depois
+    daquela" deixaria de ter resposta nos eventos. A política que decide o valor está na ADR
+    0005.
+    """
+
+    order_id: OrderId
+    side: Side
+    price: Ticks
+    quantity: int
+    priority_renewed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class BookEntry:
     """Uma ordem viva na visualização do livro: o que resta dela, ao preço em que está.
 
@@ -135,5 +164,5 @@ class BookSnapshot:
     asks: tuple[BookEntry, ...]
 
 
-type Event = Trade | OrderAccepted | OrderCancelled | BookSnapshot
+type Event = Trade | OrderAccepted | OrderCancelled | OrderAmended | BookSnapshot
 """Tudo que a engine pode devolver de um comando."""

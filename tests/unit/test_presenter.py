@@ -5,6 +5,7 @@ from matching_engine.domain.events import (
     BookSnapshot,
     Event,
     OrderAccepted,
+    OrderAmended,
     OrderCancelled,
     Trade,
 )
@@ -26,6 +27,22 @@ def trade(price: int, quantity: int, maker: int = 1, taker_side: Side = Side.BUY
 def accepted(price: int, quantity: int, side: Side = Side.BUY, order_id: int = 1) -> OrderAccepted:
     return OrderAccepted(
         order_id=OrderId(order_id), side=side, price=Ticks(price), quantity=quantity
+    )
+
+
+def amended(
+    price: int,
+    quantity: int,
+    side: Side = Side.BUY,
+    order_id: int = 1,
+    priority_renewed: bool = True,
+) -> OrderAmended:
+    return OrderAmended(
+        order_id=OrderId(order_id),
+        side=side,
+        price=Ticks(price),
+        quantity=quantity,
+        priority_renewed=priority_renewed,
     )
 
 
@@ -62,6 +79,42 @@ def test_a_single_trade() -> None:
 )
 def test_an_accepted_order_prints_the_side_in_lower_case(side: Side, expected: str) -> None:
     assert format_events([accepted(1000, 100, side=side, order_id=7)]) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("side", "expected"),
+    [
+        (Side.BUY, "Order amended: buy 200 @ 9.98 1"),
+        (Side.SELL, "Order amended: sell 200 @ 9.98 1"),
+    ],
+)
+def test_an_amended_order_mirrors_the_created_line_with_the_verb_changed(
+    side: Side, expected: str
+) -> None:
+    """O enunciado não especifica saída para amend; espelhar o que já existe é a escolha."""
+    assert format_events([amended(998, 200, side=side)]) == [expected]
+
+
+@pytest.mark.parametrize("priority_renewed", [True, False])
+def test_the_amended_line_does_not_show_whether_priority_was_renewed(
+    priority_renewed: bool,
+) -> None:
+    """O efeito da renovação é a posição na fila, e quem a mostra é ``print book``."""
+    event = amended(1000, 100, priority_renewed=priority_renewed)
+
+    assert format_events([event]) == ["Order amended: buy 100 @ 10 1"]
+
+
+def test_an_amend_that_executes_prints_its_fills_and_then_its_remainder() -> None:
+    events: list[Event] = [
+        trade(2000, 100, maker=1),
+        amended(2000, 50, side=Side.BUY, order_id=2),
+    ]
+
+    assert format_events(events) == [
+        "Trade, price: 20, qty: 100",
+        "Order amended: buy 50 @ 20 2",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -231,6 +284,8 @@ def test_every_event_type_closes_the_pending_run_of_trades() -> None:
         trade(2000, 20),
         cancelled(order_id=5),
         trade(2000, 30),
+        amended(998, 70, side=Side.BUY, order_id=6),
+        trade(2000, 40),
         book(bids=[(50, 1000)], asks=[]),
     ]
 
@@ -240,6 +295,8 @@ def test_every_event_type_closes_the_pending_run_of_trades() -> None:
         "Trade, price: 20, qty: 20",
         "Order cancelled",
         "Trade, price: 20, qty: 30",
+        "Order amended: buy 70 @ 9.98 6",
+        "Trade, price: 20, qty: 40",
         "Ordens de Compra | Ordens de Venda",
         "-----------------|----------------",
         "50 @ 10          |",

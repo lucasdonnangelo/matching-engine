@@ -27,10 +27,13 @@ from matching_engine.domain.events import (
     BookSnapshot,
     Event,
     OrderAccepted,
+    OrderAmended,
     OrderCancelled,
     Trade,
 )
+from matching_engine.domain.order import OrderId
 from matching_engine.domain.price import Ticks, format_price
+from matching_engine.domain.side import Side
 
 _BIDS_HEADER: Final = "Ordens de Compra"
 _ASKS_HEADER: Final = "Ordens de Venda"
@@ -84,6 +87,8 @@ def format_events(events: Sequence[Event]) -> list[str]:
                 pending_quantity += event.quantity
             case OrderAccepted():
                 lines.append(_accepted_line(event))
+            case OrderAmended():
+                lines.append(_amended_line(event))
             case OrderCancelled():
                 lines.append(_CANCELLED_LINE)
             case BookSnapshot():
@@ -147,8 +152,30 @@ def _book_row(left: str, right: str, left_width: int) -> str:
 
 
 def _accepted_line(event: OrderAccepted) -> str:
-    """Lado em minúsculas, como o usuário digitou; o ``Enum`` é do domínio, não da saída."""
-    return (
-        f"Order created: {event.side.name.lower()} {event.quantity} "
-        f"@ {format_price(event.price)} {event.order_id}"
-    )
+    return _order_line("created", event.side, event.quantity, event.price, event.order_id)
+
+
+def _amended_line(event: OrderAmended) -> str:
+    """Mesma linha da ordem criada, com o verbo trocado.
+
+    O enunciado **não** especifica saída para alteração de ordem: ele mostra o livro depois
+    do amend, e não a linha de confirmação. Silêncio não serve, porque num REPL o comando
+    que não responde é indistinguível do comando que não fez nada. Entre inventar um
+    formato e reaproveitar o que já existe, reaproveitar: quem leu ``Order created: buy 200
+    @ 10 1`` lê ``Order amended: buy 200 @ 9.98 1`` sem aprender nada novo, e o id repetido
+    no fim deixa visível que a ordem continua sendo a mesma — que é justamente o que
+    distingue um amend de um cancelamento seguido de ordem nova.
+
+    ``priority_renewed`` fica de fora da linha. O efeito dele é a posição da ordem na fila,
+    e a fila é o que ``print book`` mostra: anunciá-lo aqui seria descrever em palavras o
+    que o comando seguinte exibe em ordem.
+    """
+    return _order_line("amended", event.side, event.quantity, event.price, event.order_id)
+
+
+def _order_line(verb: str, side: Side, quantity: int, price: Ticks, order_id: OrderId) -> str:
+    """Forma comum às duas linhas de ordem, para que espelhar não dependa de memória.
+
+    Lado em minúsculas, como o usuário digitou; o ``Enum`` é do domínio, não da saída.
+    """
+    return f"Order {verb}: {side.name.lower()} {quantity} @ {format_price(price)} {order_id}"

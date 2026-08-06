@@ -1,6 +1,6 @@
 import pytest
 
-from matching_engine.domain.order import Order, OrderId
+from matching_engine.domain.order import Order, OrderId, OrderIntegrityError
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.price_level import LevelIntegrityError, PriceLevel
 from matching_engine.domain.side import Side
@@ -130,7 +130,7 @@ def test_rejected_fill_leaves_the_total_untouched() -> None:
     order = make_order(1, quantity=10)
     level.add(order)
 
-    with pytest.raises(ValueError, match="excede o remanescente"):
+    with pytest.raises(OrderIntegrityError, match="excede o remanescente"):
         level.fill(order, 11)
 
     assert level.total_quantity == 10
@@ -182,6 +182,95 @@ def test_add_partial_fill_and_remove_return_the_total_to_zero() -> None:
     assert level.is_empty
     assert level.head is None
     assert list(level) == []
+
+
+def test_reduce_lowers_the_total_by_the_difference() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    first, second = make_order(1, quantity=10), make_order(2, quantity=7)
+    level.add(first)
+    level.add(second)
+
+    level.reduce(first, 4)
+
+    assert first.remaining == 4
+    assert first.quantity == 4  # nada foi executado: a ordem passa a ser de 4
+    assert level.total_quantity == 11
+
+
+def test_reduce_keeps_the_position_in_the_queue() -> None:
+    """É a diferença entre reduzir e reenfileirar: encolher não custa lugar na fila."""
+    level = PriceLevel(LEVEL_PRICE)
+    orders = [make_order(i) for i in range(1, 4)]
+    for order in orders:
+        level.add(order)
+
+    level.reduce(orders[0], 2)
+
+    assert level.head is orders[0]
+    assert list(level) == orders
+    assert len(level) == 3
+
+
+def test_reduce_preserves_what_was_already_executed() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_order(1, quantity=10)
+    level.add(order)
+    level.fill(order, 4)
+
+    level.reduce(order, 3)
+
+    assert order.quantity == 7  # 3 por executar mais os 4 que já executaram
+    assert order.remaining == 3
+    assert order.quantity - order.remaining == 4
+    assert level.total_quantity == 3
+
+
+@pytest.mark.parametrize("new_remaining", [0, -1, 10, 11])
+def test_reduce_rejects_a_new_balance_that_does_not_shrink(new_remaining: int) -> None:
+    """Zerar uma ordem é executá-la ou cancelá-la; crescer é reenfileirá-la. Nem um nem outro."""
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_order(1, quantity=10)
+    level.add(order)
+
+    with pytest.raises(LevelIntegrityError, match="redução inválida"):
+        level.reduce(order, new_remaining)
+
+    assert order.quantity == 10  # a redução recusada não deixa rastro
+    assert order.remaining == 10
+    assert level.total_quantity == 10
+
+
+def test_reduce_rejects_an_order_from_another_level() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    resident = make_order(1, quantity=10)
+    level.add(resident)
+
+    other = PriceLevel(Ticks(2000))
+    stranger = make_order(2, price=Ticks(2000), quantity=8)
+    other.add(stranger)
+
+    with pytest.raises(LevelIntegrityError, match="não pertence ao nível"):
+        level.reduce(stranger, 5)
+
+    assert level.total_quantity == 10
+    assert other.total_quantity == 8
+    assert stranger.remaining == 8
+
+
+def test_amend_to_is_rejected_while_the_order_is_in_a_level() -> None:
+    """Alterar no lugar dessincronizaria o total: o nível soma remanescentes que ele guarda."""
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_order(1, quantity=10)
+    level.add(order)
+
+    with pytest.raises(OrderIntegrityError, match="está enfileirada"):
+        order.amend_to(Ticks(2000), 5)
+
+    assert order.price == LEVEL_PRICE
+    assert order.quantity == 10
+    assert order.remaining == 10
+    assert level.total_quantity == 10
+    assert list(level) == [order]
 
 
 def test_head_is_always_the_oldest_order() -> None:

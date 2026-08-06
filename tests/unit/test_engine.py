@@ -8,11 +8,13 @@ from matching_engine.domain.events import (
     BookSnapshot,
     Event,
     OrderAccepted,
+    OrderAmended,
     OrderCancelled,
     Trade,
 )
 from matching_engine.domain.order import Order, OrderId
 from matching_engine.domain.price import Ticks
+from matching_engine.domain.price_level import PriceLevel
 from matching_engine.domain.side import Side
 
 SIDES = list(Side)
@@ -24,6 +26,10 @@ def trades_of(events: Sequence[Event]) -> list[Trade]:
 
 def acceptances_of(events: Sequence[Event]) -> list[OrderAccepted]:
     return [event for event in events if isinstance(event, OrderAccepted)]
+
+
+def amendments_of(events: Sequence[Event]) -> list[OrderAmended]:
+    return [event for event in events if isinstance(event, OrderAmended)]
 
 
 def traded_by_price(events: Sequence[Event]) -> dict[Ticks, int]:
@@ -45,6 +51,13 @@ def resting(engine: MatchingEngine, side: Side, price: Ticks, quantity: int) -> 
 
 def top_of(engine: MatchingEngine, side: Side) -> Ticks | None:
     return engine.book.best_bid if side is Side.BUY else engine.book.best_ask
+
+
+def level_of(engine: MatchingEngine, side: Side, price: Ticks) -> PriceLevel:
+    """O nível daquele preço, que o teste espera existir."""
+    level = engine.book.side(side).level_at(price)
+    assert level is not None
+    return level
 
 
 def snapshot_of(engine: MatchingEngine) -> BookSnapshot:
@@ -432,6 +445,287 @@ def test_a_cancelled_order_no_longer_matches() -> None:
     assert trades_of(events) == []
     assert len(acceptances_of(events)) == 1
     assert engine.book.best_bid == 2000
+
+
+def test_reducing_the_quantity_keeps_the_place_in_the_queue() -> None:
+    """A redução não prejudica quem está atrás, então não custa prioridade — ADR 0005."""
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 100)
+    second = resting(engine, Side.BUY, Ticks(1000), 200)
+    third = resting(engine, Side.BUY, Ticks(1000), 300)
+    sequence_id = first.sequence_id
+
+    events = engine.amend(first.order_id, None, 40)
+
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert level.head is first
+    assert list(level) == [first, second, third]
+    assert first.sequence_id == sequence_id
+    assert events == [
+        OrderAmended(
+            order_id=first.order_id,
+            side=Side.BUY,
+            price=Ticks(1000),
+            quantity=40,
+            priority_renewed=False,
+        )
+    ]
+
+
+def test_reducing_the_quantity_lowers_the_level_total_by_the_difference() -> None:
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 100)
+    resting(engine, Side.BUY, Ticks(1000), 200)
+
+    engine.amend(first.order_id, None, 40)
+
+    assert level_of(engine, Side.BUY, Ticks(1000)).total_quantity == 240
+    assert first.quantity == 40
+    assert first.remaining == 40
+
+
+def test_reducing_a_partially_filled_order_above_what_it_executed() -> None:
+    """Ordem de 100 com 40 executados, alterada para 80: redução perante a quantidade."""
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 40)
+
+    events = engine.amend(maker.order_id, None, 80)
+
+    assert maker.quantity == 80
+    assert maker.remaining == 40  # o saldo é o que resta do pedido novo: 80 - 40
+    assert level_of(engine, Side.SELL, Ticks(2000)).total_quantity == 40
+    [amended] = amendments_of(events)
+    assert amended.quantity == 40
+    assert not amended.priority_renewed
+
+
+@pytest.mark.parametrize("new_quantity", [40, 30, 1])
+def test_reducing_to_at_most_what_was_executed_is_rejected(new_quantity: int) -> None:
+    """Os 40 negociados não voltam: uma ordem de 100 com 40 executados não vira de 30."""
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 40)
+
+    with pytest.raises(ValueError, match="já executou 40"):
+        engine.amend(maker.order_id, None, new_quantity)
+
+    assert maker.quantity == 100  # a alteração recusada não deixa rastro
+    assert maker.remaining == 60
+    assert level_of(engine, Side.SELL, Ticks(2000)).total_quantity == 60
+
+
+@pytest.mark.parametrize("new_quantity", [0, -5])
+def test_reducing_to_zero_or_less_is_rejected(new_quantity: int) -> None:
+    engine = MatchingEngine()
+    order = resting(engine, Side.BUY, Ticks(1000), 100)
+
+    with pytest.raises(ValueError, match="não pode ser reduzida"):
+        engine.amend(order.order_id, None, new_quantity)
+
+    assert order.quantity == 100
+    assert order.remaining == 100
+    assert level_of(engine, Side.BUY, Ticks(1000)).total_quantity == 100
+
+
+def test_increasing_the_quantity_sends_the_order_to_the_back_of_the_queue() -> None:
+    """Crescer é pedir mais fila do que a que já se tinha, e isso se paga com tempo."""
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 100)
+    second = resting(engine, Side.BUY, Ticks(1000), 200)
+
+    events = engine.amend(first.order_id, None, 150)
+
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert level.head is second
+    assert list(level) == [second, first]
+    assert level.total_quantity == 350
+    assert first.quantity == 150
+    assert first.remaining == 150
+    [amended] = amendments_of(events)
+    assert amended.quantity == 150
+    assert amended.priority_renewed
+
+
+def test_changing_the_price_to_an_existing_level_enters_at_the_back_of_it() -> None:
+    engine = MatchingEngine()
+    moved = resting(engine, Side.BUY, Ticks(1000), 200)
+    settled = resting(engine, Side.BUY, Ticks(999), 100)
+
+    engine.amend(moved.order_id, Ticks(999), None)
+
+    level = level_of(engine, Side.BUY, Ticks(999))
+    assert list(level) == [settled, moved]
+    assert level.total_quantity == 300
+    assert engine.book.side(Side.BUY).level_at(Ticks(1000)) is None
+    assert engine.book.best_bid == 999
+    assert len(engine.book) == 2
+
+
+def test_changing_the_price_to_a_new_level_creates_it_and_drops_the_emptied_one() -> None:
+    engine = MatchingEngine()
+    order = resting(engine, Side.BUY, Ticks(1000), 200)
+
+    engine.amend(order.order_id, Ticks(998), None)
+
+    bids = engine.book.side(Side.BUY)
+    assert bids.level_at(Ticks(1000)) is None
+    assert list(level_of(engine, Side.BUY, Ticks(998))) == [order]
+    assert len(bids) == 1
+    assert order.price == 998
+    assert engine.book.best_bid == 998
+
+
+def test_the_order_id_is_preserved_and_the_sequence_id_is_new() -> None:
+    """Identidade é do cliente, prioridade é da fila: só a segunda muda no amend."""
+    engine = MatchingEngine()
+    order = resting(engine, Side.BUY, Ticks(1000), 100)
+    order_id, sequence_id = order.order_id, order.sequence_id
+
+    [amended] = amendments_of(engine.amend(order_id, Ticks(990), None))
+
+    assert amended.order_id == order_id
+    assert engine.book.get(order_id) is order
+    assert order.sequence_id > sequence_id
+    assert len(engine.book) == 1
+
+
+def test_the_example_of_requirement_4() -> None:
+    """Bids 200 @ 10 e 100 @ 9.99; alterar a de 200 para 9.98 a leva para baixo da de 9.99."""
+    engine = MatchingEngine()
+    moved = resting(engine, Side.BUY, Ticks(1000), 200)
+    resting(engine, Side.BUY, Ticks(999), 100)
+
+    engine.amend(moved.order_id, Ticks(998), None)
+
+    assert snapshot_of(engine).bids == (
+        BookEntry(quantity=100, price=Ticks(999)),
+        BookEntry(quantity=200, price=Ticks(998)),
+    )
+
+
+def test_an_amend_that_makes_the_order_marketable_executes_and_rests_the_remainder() -> None:
+    """Preço agressivo é preço agressivo, tenha vindo de submit ou de amend — ADR 0001."""
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    taker = resting(engine, Side.BUY, Ticks(1000), 150)
+
+    events = engine.amend(taker.order_id, Ticks(2000), None)
+
+    assert trades_of(events) == [
+        Trade(price=Ticks(2000), quantity=100, maker_order_id=maker.order_id, taker_side=Side.BUY)
+    ]
+    [amended] = amendments_of(events)
+    assert amended.price == 2000
+    assert amended.quantity == 50
+    assert amended.priority_renewed
+    assert taker.quantity == 150
+    assert taker.remaining == 50
+    assert engine.book.best_bid == 2000
+    assert engine.book.best_ask is None
+    assert len(engine.book) == 1
+
+
+def test_an_amend_that_fills_the_order_completely_emits_only_trades() -> None:
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 200)
+    taker = resting(engine, Side.BUY, Ticks(1000), 150)
+
+    events = engine.amend(taker.order_id, Ticks(2000), None)
+
+    assert events == [
+        Trade(price=Ticks(2000), quantity=150, maker_order_id=maker.order_id, taker_side=Side.BUY)
+    ]
+    assert taker.is_filled
+    assert taker.order_id not in engine.book
+    assert engine.book.get(taker.order_id) is None
+    assert engine.book.best_bid is None
+    assert len(engine.book) == 1
+
+
+def test_an_amend_that_changes_price_and_quantity_at_once_renews_once() -> None:
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 100)
+    second = resting(engine, Side.BUY, Ticks(999), 200)
+
+    events = engine.amend(first.order_id, Ticks(999), 60)
+
+    level = level_of(engine, Side.BUY, Ticks(999))
+    assert list(level) == [second, first]  # reduzir junto com mudar de preço não salva a fila
+    assert level.total_quantity == 260
+    assert first.quantity == 60
+    [amended] = amendments_of(events)
+    assert amended.quantity == 60
+    assert amended.priority_renewed
+
+
+def test_an_amend_that_asks_for_nothing_is_rejected() -> None:
+    engine = MatchingEngine()
+    order = resting(engine, Side.BUY, Ticks(1000), 100)
+
+    with pytest.raises(ValueError, match="nada a alterar"):
+        engine.amend(order.order_id, None, None)
+
+    assert order.remaining == 100
+
+
+def test_amending_an_unknown_id_is_rejected() -> None:
+    engine = MatchingEngine()
+
+    with pytest.raises(OrderNotFoundError, match="não está no livro"):
+        engine.amend(OrderId(999), Ticks(1000), None)
+
+
+def test_amending_an_order_that_is_no_longer_in_the_book_is_rejected() -> None:
+    engine = MatchingEngine()
+    maker = resting(engine, Side.SELL, Ticks(2000), 100)
+    engine.submit_market(Side.BUY, 100)
+
+    with pytest.raises(OrderNotFoundError):
+        engine.amend(maker.order_id, Ticks(2100), None)
+
+
+def test_amending_to_the_same_price_does_not_renew_the_priority() -> None:
+    """Alteração que não altera nada é resposta, não erro: a ordem já está onde se pediu."""
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 100)
+    second = resting(engine, Side.BUY, Ticks(1000), 200)
+    sequence_id = first.sequence_id
+
+    events = engine.amend(first.order_id, Ticks(1000), None)
+
+    [amended] = amendments_of(events)
+    assert not amended.priority_renewed
+    assert amended.quantity == 100
+    assert first.sequence_id == sequence_id
+    assert list(level_of(engine, Side.BUY, Ticks(1000))) == [first, second]
+    assert level_of(engine, Side.BUY, Ticks(1000)).total_quantity == 300
+
+
+def test_the_book_is_never_left_crossed_after_an_amend() -> None:
+    engine = MatchingEngine()
+    orders = [
+        resting(engine, Side.BUY, Ticks(1000), 100),
+        resting(engine, Side.BUY, Ticks(990), 200),
+        resting(engine, Side.SELL, Ticks(1100), 150),
+        resting(engine, Side.SELL, Ticks(1200), 300),
+    ]
+    script: list[tuple[int, Ticks | None, int | None]] = [
+        (0, Ticks(1050), None),  # sobe o bid sem alcançar a offer
+        (1, None, 400),  # aumenta a quantidade, no mesmo preço
+        (2, Ticks(1050), None),  # a offer desce até o bid: executa e repousa o resto
+        (3, Ticks(950), None),  # a offer atravessa o bid inteiro e não sobra nada
+        (1, Ticks(1100), None),  # o bid sobe e varre o que restou da offer
+    ]
+
+    for index, price, quantity in script:
+        engine.amend(orders[index].order_id, price, quantity)
+
+        best_bid, best_ask = engine.book.best_bid, engine.book.best_ask
+        assert best_bid is None or best_ask is None or best_bid < best_ask
+
+    assert engine.book.best_bid == 1100
+    assert engine.book.best_ask is None
 
 
 def test_snapshot_of_an_empty_book_has_no_entries() -> None:

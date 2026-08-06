@@ -166,8 +166,6 @@ def test_an_internal_runtime_error_is_not_swallowed() -> None:
         # o peg cruzado também para aqui: a lateralidade é do domínio, que ainda não é
         # alcançado por este comando
         ("peg bid sell 100", "peg"),
-        ("modify order 1 qty 5", "modify order"),
-        ("modify order 1 price 10", "modify order"),
     ],
 )
 def test_the_commands_that_are_not_implemented_yet_name_themselves(line: str, name: str) -> None:
@@ -185,6 +183,56 @@ def test_create_then_cancel_as_the_statement_shows() -> None:
         "Ordens de Compra | Ordens de Venda",
         "-----------------|----------------",
     ]
+
+
+def test_create_modify_and_print_book_as_the_statement_shows() -> None:
+    """O requisito 4: a ordem de 200 desce para 9.98 e passa a figurar abaixo da de 9.99."""
+    cli = Cli(MatchingEngine())
+
+    assert cli.execute("limit buy 10 200") == ["Order created: buy 200 @ 10 1"]
+    assert cli.execute("limit buy 9.99 100") == ["Order created: buy 100 @ 9.99 2"]
+    assert cli.execute("modify order 1 price 9.98") == ["Order amended: buy 200 @ 9.98 1"]
+    assert cli.execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "100 @ 9.99       |",
+        "200 @ 9.98       |",
+    ]
+
+
+def test_modifying_the_quantity_keeps_the_order_at_the_front_of_the_book() -> None:
+    cli = Cli(MatchingEngine())
+    for line in ["limit sell 20 100", "limit sell 20 200"]:
+        cli.execute(line)
+
+    assert cli.execute("modify order 1 qty 40") == ["Order amended: sell 40 @ 20 1"]
+    assert cli.execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "                 | 40 @ 20",
+        "                 | 200 @ 20",
+    ]
+
+
+def test_a_modify_that_crosses_the_book_trades_from_the_repl() -> None:
+    cli = Cli(MatchingEngine())
+    cli.execute("limit sell 20 100")
+    cli.execute("limit buy 10 150")
+
+    assert cli.execute("modify order 2 price 20") == [
+        "Trade, price: 20, qty: 100",
+        "Order amended: buy 50 @ 20 2",
+    ]
+
+
+def test_modifying_an_unknown_id_is_an_error_line() -> None:
+    cli = Cli(MatchingEngine())
+
+    lines = cli.execute("modify order 999 qty 5")
+
+    assert len(lines) == 1
+    assert lines[0].startswith("Error: ")
+    assert "999" in lines[0]
 
 
 def test_cancelling_an_unknown_id_is_an_error_line() -> None:
