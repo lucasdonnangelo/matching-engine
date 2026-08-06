@@ -12,6 +12,14 @@ def top_of(book: OrderBook, side: Side) -> Ticks | None:
     return book.best_bid if side is Side.BUY else book.best_ask
 
 
+def make_parked(book: OrderBook, side: Side = Side.BUY, quantity: int = 10) -> Order:
+    """Pegged sem referência: nasce sem preço, e é este o estado que ``park`` guarda."""
+    reference = PegReference.BID if side is Side.BUY else PegReference.OFFER
+    order = book.create_order(side, None, quantity, reference)
+    book.park(order)
+    return order
+
+
 def test_empty_book() -> None:
     book = OrderBook()
 
@@ -247,6 +255,168 @@ def test_orders_at_the_same_price_keep_fifo(side: Side) -> None:
     assert list(level) == orders
     assert level.head is orders[0]
     assert [order.sequence_id for order in level] == sorted(order.sequence_id for order in level)
+
+
+def test_a_fresh_book_has_nothing_parked() -> None:
+    assert OrderBook().parked_orders == ()
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_park_registers_in_the_global_index_and_in_no_side(side: Side) -> None:
+    """Viva e alcançável pelo id, mas fora dos dois lados: ela não tem preço a que pertencer."""
+    book = OrderBook()
+
+    order = make_parked(book, side)
+
+    assert book.parked_orders == (order,)
+    assert len(book) == 1
+    assert book.side(side).is_empty
+    assert book.opposite_side(side).is_empty
+    assert book.best_bid is None
+    assert book.best_ask is None
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_get_and_contains_find_a_parked_order(side: Side) -> None:
+    """É o que separa o registro no livro de um registro privado da engine: ``cancel`` a acha."""
+    book = OrderBook()
+
+    order = make_parked(book, side)
+
+    assert book.get(order.order_id) is order
+    assert order.order_id in book
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_unpark_takes_the_order_out_of_both_registries(side: Side) -> None:
+    book = OrderBook()
+    order = make_parked(book, side)
+
+    book.unpark(order)
+
+    assert book.parked_orders == ()
+    assert book.get(order.order_id) is None
+    assert order.order_id not in book
+    assert len(book) == 0
+
+
+def test_park_rejects_an_id_that_is_already_in_the_book() -> None:
+    book = OrderBook()
+    resident = book.create_order(Side.BUY, Ticks(1000), 10)
+    book.add(resident)
+    twin = Order(
+        order_id=resident.order_id,
+        sequence_id=book.next_sequence(),
+        side=Side.BUY,
+        price=None,
+        quantity=5,
+        peg_reference=PegReference.BID,
+    )
+
+    with pytest.raises(BookIntegrityError, match="já está no livro"):
+        book.park(twin)
+
+    assert book.parked_orders == ()
+    assert book.get(resident.order_id) is resident
+    assert len(book) == 1
+
+
+def test_park_rejects_an_order_that_is_already_parked() -> None:
+    book = OrderBook()
+    order = make_parked(book)
+
+    with pytest.raises(BookIntegrityError, match="já está no livro"):
+        book.park(order)
+
+    assert book.parked_orders == (order,)
+    assert len(book) == 1
+
+
+def test_park_rejects_an_order_that_has_a_price() -> None:
+    """Ter preço é ter lugar no livro: quem tem lugar entra por ``add``, não por aqui."""
+    book = OrderBook()
+    priced_peg = book.create_order(Side.BUY, Ticks(1000), 10, PegReference.BID)
+
+    with pytest.raises(BookIntegrityError, match="não está parked"):
+        book.park(priced_peg)
+
+    assert book.parked_orders == ()
+    assert len(book) == 0
+
+
+def test_park_rejects_an_order_that_is_not_pegged() -> None:
+    book = OrderBook()
+
+    with pytest.raises(BookIntegrityError, match="não está parked"):
+        book.park(book.create_order(Side.BUY, Ticks(1000), 10))
+
+    assert book.parked_orders == ()
+    assert len(book) == 0
+
+
+def test_unpark_rejects_an_order_that_is_not_parked() -> None:
+    book = OrderBook()
+    resident = book.create_order(Side.BUY, Ticks(1000), 10)
+    book.add(resident)
+
+    with pytest.raises(BookIntegrityError, match="não está parked"):
+        book.unpark(resident)
+
+    assert book.get(resident.order_id) is resident
+    assert len(book) == 1
+    assert len(book.side(Side.BUY)) == 1
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_remove_of_a_parked_order_delegates_to_unpark(side: Side) -> None:
+    """Cancelar não pergunta onde a ordem está; sem o desvio, o lado a recusaria."""
+    book = OrderBook()
+    order = make_parked(book, side)
+
+    book.remove(order)
+
+    assert book.parked_orders == ()
+    assert book.get(order.order_id) is None
+    assert order.order_id not in book
+    assert len(book) == 0
+    assert book.side(side).is_empty
+
+
+def test_remove_leaves_the_other_parked_orders_alone() -> None:
+    book = OrderBook()
+    first, second = make_parked(book), make_parked(book)
+
+    book.remove(first)
+
+    assert book.parked_orders == (second,)
+    assert len(book) == 1
+
+
+def test_parked_orders_come_in_sequence_order() -> None:
+    """A ordem de chegada decide a fila quando a referência surgir, e o ``dict`` não a guarda."""
+    book = OrderBook()
+    orders = [book.create_order(Side.BUY, None, 10, PegReference.BID) for _ in range(3)]
+
+    for order in reversed(orders):
+        book.park(order)
+
+    assert book.parked_orders == tuple(orders)
+    assert [order.sequence_id for order in book.parked_orders] == sorted(
+        order.sequence_id for order in orders
+    )
+
+
+def test_parked_orders_coexist_with_a_populated_book() -> None:
+    book = OrderBook()
+    book.add(book.create_order(Side.BUY, Ticks(1000), 10))
+    book.add(book.create_order(Side.SELL, Ticks(1010), 10))
+    parked = make_parked(book, Side.BUY)
+
+    assert book.best_bid == 1000
+    assert book.best_ask == 1010
+    assert book.parked_orders == (parked,)
+    assert len(book) == 3  # a parked está viva e conta como qualquer outra
+    assert len(book.side(Side.BUY)) == 1
 
 
 def test_emptying_the_book_returns_it_to_the_initial_state() -> None:

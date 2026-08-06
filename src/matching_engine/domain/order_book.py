@@ -40,14 +40,19 @@ class OrderBook:
     — consome sequência — sem criar ordem nova, já que o cliente continua se referindo à
     ordem pelo mesmo id. Com um contador só, ou o id saltaria a cada amend, ou a
     prioridade ficaria presa à identidade e o amend não teria como pagar o seu preço.
+
+    ``_parked`` é o terceiro lugar onde uma ordem pode estar, ao lado dos dois lados: as
+    pegged à espera de referência. Elas contam em ``__len__`` e são achadas por ``get``
+    como qualquer outra, porque estão vivas — ver ``park``.
     """
 
-    __slots__ = ("_asks", "_bids", "_next_order_id", "_next_sequence", "_orders")
+    __slots__ = ("_asks", "_bids", "_next_order_id", "_next_sequence", "_orders", "_parked")
 
     def __init__(self) -> None:
         self._bids = BookSide(Side.BUY)
         self._asks = BookSide(Side.SELL)
         self._orders: dict[OrderId, Order] = {}
+        self._parked: dict[OrderId, Order] = {}
         self._next_sequence = 1
         self._next_order_id = 1
 
@@ -143,9 +148,20 @@ class OrderBook:
         A checagem do índice vem antes de qualquer mutação, e compara identidade: retirar
         pelo id uma ordem homônima apagaria do índice a entrada de outra ordem, viva, que
         continuaria no nível — o fantasma exato que este método existe para não criar.
+
+        A ordem *parked* desvia para ``unpark`` porque as três baixas não se aplicam a
+        ela: ela não está em nível nenhum, logo não há nível a esvaziar nem preço a
+        consultar. Sem o desvio, ``BookSide.remove`` a recusaria — corretamente, e por um
+        motivo que não é o dela —, e cancelar uma pegged à espera de referência viraria
+        erro interno. Quem chama ``cancel`` não sabe, nem precisa saber, se a ordem está
+        no livro ou estacionada: é o mesmo id e a mesma retirada.
         """
         if self._orders.get(order.order_id) is not order:
             raise BookIntegrityError(f"ordem {order.order_id} não está no índice global")
+
+        if self._parked.get(order.order_id) is order:
+            self.unpark(order)
+            return
 
         side = self.side(order.side)
         level = None if order.price is None else side.level_at(order.price)
@@ -154,11 +170,83 @@ class OrderBook:
             side.remove_if_empty(level)
         del self._orders[order.order_id]
 
+    def park(self, order: Order) -> None:
+        """Guarda fora dos dois lados uma pegged que ainda não tem referência de preço. O(1).
+
+        **A ordem parked mora no índice global, mas em nenhum dos dois lados.** Os dois
+        fatos são o mesmo fato visto de dois ângulos. Ela está viva — o cliente pode
+        cancelá-la pelo id, e ela volta ao livro assim que surgir uma não-pegged do seu
+        lado para lhe servir de referência —, então tem de ser encontrável por ``get``,
+        que é por onde ``cancel`` e ``amend`` chegam a qualquer ordem. Mas ela não tem
+        preço, e os lados são indexados por preço: não existe nível a que ela pertença, e
+        ``BookSide.add`` a recusa justamente por isso.
+
+        A alternativa seria a engine manter as parked num registro próprio, e ela é pior
+        de um jeito específico: ``cancel`` consulta o livro, de modo que a ordem parked
+        ficaria invisível ao cancelamento e o cliente receberia "ordem não está no livro"
+        para uma ordem que ele acabou de enviar e que a engine ainda guarda. A intenção do
+        cliente estaria preservada em algum lugar que ele não consegue alcançar. Com o
+        registro aqui, o índice global volta a ser o que o nome diz — todas as ordens
+        vivas —, e quem pergunta por id não precisa saber em que estado a ordem está.
+
+        As duas guardas são de integridade. Quem decide estacionar uma ordem é a
+        reconciliação de peg, não o usuário: estacionar uma ordem que tem preço, ou um id
+        que o livro já conhece, é a engine tendo perdido a conta de si mesma.
+        """
+        if not order.is_parked:
+            raise BookIntegrityError(
+                f"ordem {order.order_id} não está parked — tem preço, ou não é pegged — e "
+                f"não pode ser guardada fora dos dois lados"
+            )
+        if order.order_id in self._orders or order.order_id in self._parked:
+            raise BookIntegrityError(f"order_id {order.order_id} já está no livro")
+
+        self._parked[order.order_id] = order
+        self._orders[order.order_id] = order
+
+    def unpark(self, order: Order) -> None:
+        """Tira a ordem do registro de parked e do índice global. O(1).
+
+        As duas baixas moram juntas pelo mesmo motivo que as três de ``remove``: separá-las
+        é como se produz estado fantasma — aqui, uma ordem no índice global que nem o
+        registro de parked nem os dois lados guardam.
+
+        **Não** exige que a ordem ainda esteja *parked*. Quem reativa uma pegged precisa
+        lhe dar preço antes de inseri-la no livro, e a ordem em que essas duas coisas
+        acontecem é assunto de quem reativa; a guarda pelo registro, comparando identidade,
+        já é total sem precisar opinar sobre isso. Retirar do índice global fica a cargo
+        deste método porque ``add`` recusa id repetido: a ordem tem de sair antes de voltar.
+        """
+        if self._parked.get(order.order_id) is not order:
+            raise BookIntegrityError(f"ordem {order.order_id} não está parked")
+
+        del self._parked[order.order_id]
+        del self._orders[order.order_id]
+
+    @property
+    def parked_orders(self) -> tuple[Order, ...]:
+        """As ordens parked, da mais antiga para a mais nova. O(K log K).
+
+        A ordem é por ``sequence_id``, e não a de inserção do ``dict``, porque é ela que
+        decide a fila: quando surge referência, as parked entram no livro, e quem esperou
+        mais tempo entra primeiro. As duas ordens coincidem hoje, o que é exatamente o
+        risco — apoiar-se na coincidência daria uma prioridade correta por acidente, que
+        deixaria de valer no primeiro caminho que estacione de novo uma ordem já
+        estacionada antes, mandando-a para o fim de um dicionário em que ela deveria estar
+        na frente.
+
+        Devolve uma tupla, e não o ``dict`` nem uma vista dele, porque quem reconcilia
+        reinsere as ordens **enquanto** percorre a lista: iterar sobre a coleção viva
+        mutaria o que está sendo iterado.
+        """
+        return tuple(sorted(self._parked.values(), key=lambda order: order.sequence_id))
+
     def get(self, order_id: OrderId) -> Order | None:
         """Ordem viva daquele id, ou ``None``. O(1).
 
         É por este índice que ``cancel`` e ``amend`` chegam à ordem sem varrer o livro, e
-        é ele que dá a alça de remoção em O(1) da fila intrusiva.
+        é ele que dá a alça de remoção em O(1) da fila intrusiva. Acha também a ordem
+        *parked*, que está viva ainda que fora dos dois lados — ver ``park``.
         """
         return self._orders.get(order_id)
 

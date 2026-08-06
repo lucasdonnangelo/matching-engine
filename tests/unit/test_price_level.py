@@ -1,9 +1,10 @@
 import pytest
 
 from matching_engine.domain.order import Order, OrderId, OrderIntegrityError
+from matching_engine.domain.order_queue import QueueIntegrityError
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.price_level import LevelIntegrityError, PriceLevel
-from matching_engine.domain.side import Side
+from matching_engine.domain.side import PegReference, Side
 
 LEVEL_PRICE = Ticks(1000)
 
@@ -16,6 +17,18 @@ def make_order(order_id: int, *, price: Ticks = LEVEL_PRICE, quantity: int = 10)
         side=Side.BUY,
         price=price,
         quantity=quantity,
+    )
+
+
+def make_pegged_order(order_id: int, *, price: Ticks = LEVEL_PRICE, quantity: int = 10) -> Order:
+    """Pegged já reprecificada: tem preço, e por isso pertence a um nível."""
+    return Order(
+        order_id=OrderId(order_id),
+        sequence_id=order_id,
+        side=Side.BUY,
+        price=price,
+        quantity=quantity,
+        peg_reference=PegReference.BID,
     )
 
 
@@ -289,6 +302,135 @@ def test_head_is_always_the_oldest_order() -> None:
         level.remove(expected)
 
     assert level.head is None
+
+
+def test_empty_level_counts_no_non_pegged_order() -> None:
+    assert PriceLevel(LEVEL_PRICE).non_pegged_count == 0
+
+
+def test_non_pegged_count_rises_with_each_add() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+
+    for expected, order_id in enumerate(range(1, 4), start=1):
+        level.add(make_order(order_id))
+        assert level.non_pegged_count == expected
+
+
+def test_add_of_a_pegged_order_leaves_the_count_alone() -> None:
+    """A pegged não é referência de ninguém: ela toma preço, não o dita."""
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_order(1))
+
+    level.add(make_pegged_order(2))
+
+    assert len(level) == 2
+    assert level.total_quantity == 20  # a pegged conta na quantidade, só não na referência
+    assert level.non_pegged_count == 1
+
+
+def test_a_level_of_only_pegged_orders_counts_zero() -> None:
+    """É esta a leitura O(1) que identifica o nível pegged-only do item 7 dos invariantes."""
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_pegged_order(1))
+    level.add(make_pegged_order(2))
+
+    assert not level.is_empty
+    assert len(level) == 2
+    assert level.non_pegged_count == 0
+
+
+def test_non_pegged_count_falls_with_each_remove() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    orders = [make_order(order_id) for order_id in range(1, 4)]
+    for order in orders:
+        level.add(order)
+
+    for expected, order in enumerate(orders, start=1):
+        level.remove(order)
+        assert level.non_pegged_count == 3 - expected
+
+
+def test_remove_of_a_pegged_order_leaves_the_count_alone() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    resident = make_order(1)
+    pegged = make_pegged_order(2)
+    level.add(resident)
+    level.add(pegged)
+
+    level.remove(pegged)
+
+    assert level.non_pegged_count == 1
+    assert list(level) == [resident]
+
+
+def test_fill_does_not_change_the_non_pegged_count() -> None:
+    """Executar muda quantidade, não composição: a ordem zerada continua no nível."""
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_order(1, quantity=10)
+    level.add(order)
+
+    level.fill(order, 4)
+    assert level.non_pegged_count == 1
+
+    level.fill(order, 6)
+    assert order.is_filled
+    assert level.non_pegged_count == 1  # quem a retira é o chamador, e é lá que a conta baixa
+
+
+def test_reduce_does_not_change_the_non_pegged_count() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_order(1, quantity=10)
+    level.add(order)
+
+    level.reduce(order, 3)
+
+    assert level.non_pegged_count == 1
+
+
+def test_a_rejected_add_does_not_change_the_non_pegged_count() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_order(1))
+
+    with pytest.raises(LevelIntegrityError, match="não pertence ao nível"):
+        level.add(make_order(2, price=Ticks(2000)))
+
+    assert level.non_pegged_count == 1
+
+
+def test_an_add_rejected_by_the_queue_does_not_change_the_non_pegged_count() -> None:
+    """A conta sobe depois de a fila aceitar, e é por isso que a recusa dela também não conta."""
+    level = PriceLevel(LEVEL_PRICE)
+    resident = make_order(1)
+    level.add(resident)
+    twin_level = PriceLevel(LEVEL_PRICE)
+
+    with pytest.raises(QueueIntegrityError, match="já está ligada a uma fila"):
+        twin_level.add(resident)
+
+    assert twin_level.non_pegged_count == 0
+    assert level.non_pegged_count == 1
+
+
+def test_long_mixed_sequence_keeps_the_non_pegged_count_in_step() -> None:
+    """Conta mantida à mão desvia por acúmulo: só uma sequência longa expõe o desvio."""
+    level = PriceLevel(LEVEL_PRICE)
+    orders = [make_pegged_order(i) if i % 3 == 0 else make_order(i) for i in range(1, 41)]
+
+    for index, order in enumerate(orders):
+        level.add(order)
+        if index % 4 == 0:
+            level.fill(order, 4)
+        if index % 5 == 0:
+            level.reduce(order, 2)
+        if index % 7 == 0:
+            level.remove(order)
+
+    for order in list(level)[:8]:
+        level.remove(order)
+
+    assert level.non_pegged_count == sum(1 for order in level if not order.is_pegged)
+    assert level.non_pegged_count > 0  # a sequência não esvaziou as não-pegged por acidente
+    assert len(level) > level.non_pegged_count  # nem as pegged
 
 
 def test_long_mixed_sequence_keeps_the_total_in_step() -> None:

@@ -14,6 +14,9 @@ O que se compra em tempo se paga em coerência: o total vira estado a manter em 
 isso ele é invariante do livro — seção 4, item 3 —, verificado após cada comando pela
 suíte de propriedade, e por isso ``fill`` existe aqui, em vez de o chamador executar a
 ordem por fora.
+
+``non_pegged_count`` é mantido pelo mesmo argumento, aplicado a outra pergunta: quantas
+ordens deste nível não são pegged. Ver a propriedade homônima.
 """
 
 from __future__ import annotations
@@ -46,12 +49,13 @@ class PriceLevel:
     únicas a escrevê-lo.
     """
 
-    __slots__ = ("_price", "_queue", "_total_quantity")
+    __slots__ = ("_non_pegged_count", "_price", "_queue", "_total_quantity")
 
     def __init__(self, price: Ticks) -> None:
         self._price = price
         self._queue = OrderQueue()
         self._total_quantity = 0
+        self._non_pegged_count = 0
 
     @property
     def price(self) -> Ticks:
@@ -62,6 +66,34 @@ class PriceLevel:
     def total_quantity(self) -> int:
         """Soma dos ``remaining`` das ordens do nível."""
         return self._total_quantity
+
+    @property
+    def non_pegged_count(self) -> int:
+        """Quantas ordens do nível **não** são pegged.
+
+        Contado, e não varrido, pela mesma assimetria que faz ``total_quantity`` ser
+        mantido: a referência de uma ordem pegged é o melhor preço entre as ordens
+        **não**-pegged do seu lado, e essa consulta acontece a cada comando que possa mudar
+        o topo do livro — isto é, praticamente todo comando. Descobrir por varredura se um
+        nível ainda guarda alguma ordem não-pegged custaria O(N) no nível, que é exatamente
+        a varredura proibida pela seção 5 do contrato; manter a conta custa um ``int`` nas
+        duas operações que já são O(1) e que são as únicas por onde a **composição** do
+        nível muda.
+
+        ``fill`` e ``reduce`` não mexem nele de propósito: executar ou encolher altera
+        quantidade, não composição — a ordem continua no nível, pegged ou não como antes.
+        Uma ordem zerada por ``fill`` também continua contando, e está certo, porque ela
+        ainda está na fila; quem a retira é o chamador, por ``remove``, e é lá que a conta
+        baixa.
+
+        É este contador que sustenta o item 7 dos invariantes — no máximo um nível pode
+        conter apenas ordens pegged, e ele é o topo do lado. Como toda pegged de um lado
+        toma o mesmo preço, elas se acumulam num único nível, e ``non_pegged_count == 0``
+        num nível não vazio identifica esse nível em O(1). É o que permite achar o melhor
+        preço não-pegged olhando no máximo dois níveis do topo, em vez de descer o lado
+        até encontrar um — ver ``BookSide.best_non_pegged_price``.
+        """
+        return self._non_pegged_count
 
     @property
     def head(self) -> Order | None:
@@ -81,6 +113,10 @@ class PriceLevel:
         ordem por ordem. Uma ordem alojada no nível errado seria anunciada e executada a
         um preço que não é o dela. A guarda cobre também a pegged sem referência, cujo
         preço é ``None`` e que só existe *parked*, fora do livro.
+
+        As duas contas do nível sobem depois de a fila aceitar a ordem, e pelo mesmo
+        motivo: uma recusa da ``OrderQueue`` não pode deixar nem o total nem o contador de
+        não-pegged descrevendo um nível que não mudou.
         """
         if order.price != self._price:
             raise LevelIntegrityError(
@@ -90,19 +126,24 @@ class PriceLevel:
 
         self._queue.append(order)
         self._total_quantity += order.remaining
+        if not order.is_pegged:
+            self._non_pegged_count += 1
 
     def remove(self, order: Order) -> None:
         """Retira a ordem do nível. O(1).
 
-        A fila é desfeita antes de o total baixar, e não por gosto: é a guarda de
+        A fila é desfeita antes de as contas baixarem, e não por gosto: é a guarda de
         ``OrderQueue.remove`` que recusa ordem alheia, e subtrair só depois dela garante
-        que uma recusa não deixe o total mentindo sobre um nível que não mudou.
+        que uma recusa não deixe o total nem o contador de não-pegged mentindo sobre um
+        nível que não mudou.
 
         Subtrai o ``remaining``, não a ``quantity``: o que a ordem ainda ocupa no nível é
         o que sobrou dela, e o que já executou já foi descontado por ``fill``.
         """
         self._queue.remove(order)
         self._total_quantity -= order.remaining
+        if not order.is_pegged:
+            self._non_pegged_count -= 1
 
     def fill(self, order: Order, qty: int) -> None:
         """Executa ``qty`` da ordem e baixa o total do nível junto. O(1).

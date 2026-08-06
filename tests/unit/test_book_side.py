@@ -21,12 +21,32 @@ def make_order(order_id: int, price: Ticks, *, side: Side = Side.BUY, quantity: 
     )
 
 
+def make_pegged_order(
+    order_id: int, price: Ticks, *, side: Side = Side.BUY, quantity: int = 10
+) -> Order:
+    """Pegged já reprecificada: tem preço, e por isso pertence a um nível."""
+    return Order(
+        order_id=OrderId(order_id),
+        sequence_id=order_id,
+        side=side,
+        price=price,
+        quantity=quantity,
+        peg_reference=PegReference.BID if side is Side.BUY else PegReference.OFFER,
+    )
+
+
 def make_side(side: Side, prices: Sequence[Ticks]) -> BookSide:
     """Um nível por preço, uma ordem por nível, na ordem de inserção recebida."""
     book_side = BookSide(side)
     for order_id, price in enumerate(prices, start=1):
         book_side.add(make_order(order_id, price, side=side))
     return book_side
+
+
+def top_price(side: Side, prices: Sequence[Ticks], *, ahead_by: int = 10) -> Ticks:
+    """Preço um passo à frente do topo — onde as pegged do lado repousam."""
+    best = best_of(side, prices)
+    return Ticks(best + ahead_by) if side is Side.BUY else Ticks(best - ahead_by)
 
 
 def best_of(side: Side, prices: Sequence[Ticks]) -> Ticks:
@@ -287,6 +307,104 @@ def test_emptying_every_level_leaves_the_side_coherent(side: Side) -> None:
     assert book_side.best_level is None
     assert len(book_side) == 0
     assert list(book_side) == []
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_of_an_empty_side_is_none(side: Side) -> None:
+    assert BookSide(side).best_non_pegged_price is None
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_is_the_top_when_no_level_is_pegged_only(side: Side) -> None:
+    prices = [Ticks(1000), Ticks(1050), Ticks(990), Ticks(1010)]
+
+    book_side = make_side(side, prices)
+
+    assert book_side.best_non_pegged_price == best_of(side, prices)
+    assert book_side.best_non_pegged_price == book_side.best_price
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_takes_a_top_level_that_mixes_the_two(side: Side) -> None:
+    """Basta uma não-pegged no nível: o que desqualifica o topo é não ter nenhuma."""
+    prices = [Ticks(1000), Ticks(1010)]
+    book_side = make_side(side, prices)
+
+    book_side.add(make_pegged_order(99, best_of(side, prices), side=side))
+
+    assert book_side.best_non_pegged_price == best_of(side, prices)
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_skips_a_pegged_only_top_level(side: Side) -> None:
+    """O caso que a consulta existe para resolver: o topo é das pegged, a referência é o de trás."""
+    prices = [Ticks(990), Ticks(1000), Ticks(1010)]
+    book_side = make_side(side, prices)
+    pegged_price = top_price(side, prices)
+    book_side.add(make_pegged_order(98, pegged_price, side=side))
+    book_side.add(make_pegged_order(99, pegged_price, side=side))
+
+    assert book_side.best_price == pegged_price
+    assert book_side.best_non_pegged_price == best_of(side, prices)
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_of_a_side_with_only_a_pegged_level_is_none(side: Side) -> None:
+    """Item 7 intacto — o único nível é o topo —, e mesmo assim não há referência nenhuma."""
+    book_side = BookSide(side)
+    book_side.add(make_pegged_order(1, Ticks(1000), side=side))
+
+    assert book_side.best_price == 1000
+    assert book_side.best_non_pegged_price is None
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_rejects_two_pegged_only_levels(side: Side) -> None:
+    """Todo o lado só de pegged: elas se espalharam por dois preços, o que o item 7 proíbe."""
+    book_side = BookSide(side)
+    book_side.add(make_pegged_order(1, Ticks(1000), side=side))
+    book_side.add(make_pegged_order(2, Ticks(1010), side=side))
+
+    with pytest.raises(LevelIntegrityError, match="item 7 dos invariantes"):
+        _ = book_side.best_non_pegged_price
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_fails_instead_of_descending_to_a_third_level(side: Side) -> None:
+    """Há resposta um nível abaixo, e é por isso mesmo que a busca não continua.
+
+    Devolvê-la mascararia a violação e faria a consulta descer o lado inteiro, que é a
+    varredura O(P) que a seção 5 do contrato proíbe.
+    """
+    prices = [Ticks(1000)]
+    book_side = make_side(side, prices)
+    book_side.add(make_pegged_order(98, top_price(side, prices), side=side))
+    book_side.add(make_pegged_order(99, top_price(side, prices, ahead_by=20), side=side))
+
+    with pytest.raises(LevelIntegrityError, match="item 7 dos invariantes"):
+        _ = book_side.best_non_pegged_price
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_best_non_pegged_price_follows_the_level_losing_its_last_non_pegged_order(
+    side: Side,
+) -> None:
+    """A conta é do nível, e a consulta só a lê: esvaziar as não-pegged do topo muda a resposta."""
+    prices = [Ticks(1000), Ticks(1010)]
+    book_side = make_side(side, prices)
+    top = book_side.best_level
+    assert top is not None
+    resident = top.head
+    assert resident is not None
+    book_side.add(make_pegged_order(99, top.price, side=side))
+
+    assert book_side.best_non_pegged_price == top.price
+
+    book_side.remove(resident)
+
+    behind = [price for price in prices if price != top.price]
+    assert book_side.best_price == top.price  # a pegged segura o nível no índice
+    assert book_side.best_non_pegged_price == best_of(side, behind)
 
 
 @pytest.mark.parametrize("side", SIDES)

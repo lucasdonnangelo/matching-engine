@@ -40,14 +40,19 @@ class BookSide:
     maior preço, a melhor offer é o menor. Isso é um índice de posição fixado na
     construção — ``-1`` (último) para ``BUY``, ``0`` (primeiro) para ``SELL`` — passado ao
     ``peekitem``, em vez de um ramo condicional repetido a cada consulta.
+
+    ``_second_index`` é o mesmo raciocínio um passo para dentro: o nível logo atrás do
+    topo, ``-2`` no ``BUY`` e ``1`` no ``SELL``. É tudo de que ``best_non_pegged_price``
+    precisa, e fixá-lo aqui evita repetir a inversão de lado dentro da consulta.
     """
 
-    __slots__ = ("_best_index", "_levels", "_side")
+    __slots__ = ("_best_index", "_levels", "_second_index", "_side")
 
     def __init__(self, side: Side) -> None:
         self._side = side
         self._levels: SortedDict[Ticks, PriceLevel] = SortedDict()
         self._best_index = -1 if side is Side.BUY else 0
+        self._second_index = -2 if side is Side.BUY else 1
 
     @property
     def side(self) -> Side:
@@ -73,6 +78,55 @@ class BookSide:
             return None
         best: tuple[Ticks, PriceLevel] = self._levels.peekitem(self._best_index)
         return best[1]
+
+    @property
+    def best_non_pegged_price(self) -> Ticks | None:
+        """Melhor preço entre os níveis que guardam alguma ordem não-pegged. O(log P).
+
+        É a referência de preço das ordens pegged deste lado — decisão da seção 3 do
+        contrato: uma pegged se ancora no melhor preço entre as ordens **não**-pegged, e
+        não no topo bruto. Tomar o topo bruto criaria dependência circular entre pegged, já
+        que cada uma passaria a se ancorar no preço que a outra acabou de assumir, e a
+        reprecificação deixaria de terminar numa passada.
+
+        **Dois níveis bastam**, e é o item 7 dos invariantes que garante isso. Todas as
+        pegged de um lado tomam o mesmo preço — esta própria resposta —, então elas se
+        acumulam num único nível, que ou já contém as não-pegged que lhes servem de
+        referência, ou fica exatamente um preço à frente delas, no topo. Daí os dois casos:
+        se o topo tem alguma não-pegged, ele é a resposta; se não tem, ele é o nível
+        pegged-only, e o nível logo atrás é obrigatoriamente o das não-pegged de onde o
+        preço das pegged veio. Duas leituras de ponta, e a consulta continua O(log P).
+
+        Um segundo nível também sem não-pegged **não** é caso a tratar: é o item 7 violado,
+        e a resposta é ``LevelIntegrityError``. Continuar descendo o lado até achar alguma
+        não-pegged devolveria um preço plausível e faria duas coisas ruins ao mesmo tempo —
+        mascararia a violação, deixando o livro operar corrompido até que o sintoma
+        aparecesse longe da causa, e transformaria uma consulta O(log P) na varredura O(P)
+        que a seção 5 do contrato proíbe. O erro é ``RuntimeError`` pelo critério da seção
+        6: quem coloca ordem pegged em nível é a engine, então esse estado é bug interno e
+        não comando malformado.
+
+        Lado vazio responde ``None``, e um lado cujo único nível é pegged-only também: não
+        há violação nenhuma aí, apenas não existe referência, e é ``None`` que diz isso.
+        Quem pergunta é a reconciliação de peg, para a qual ausência de referência não é
+        erro — é o que manda a ordem para *parked*.
+        """
+        if not self._levels:
+            return None
+
+        best: tuple[Ticks, PriceLevel] = self._levels.peekitem(self._best_index)
+        if best[1].non_pegged_count > 0:
+            return best[0]
+        if len(self._levels) == 1:
+            return None
+
+        second: tuple[Ticks, PriceLevel] = self._levels.peekitem(self._second_index)
+        if second[1].non_pegged_count == 0:
+            raise LevelIntegrityError(
+                f"lado {self._side.name} tem dois níveis seguidos sem ordem não-pegged, "
+                f"{best[0]} e {second[0]}: o item 7 dos invariantes foi violado"
+            )
+        return second[0]
 
     @property
     def is_empty(self) -> bool:
