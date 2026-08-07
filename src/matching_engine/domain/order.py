@@ -260,6 +260,34 @@ class Order:
         self.quantity = new_quantity
         self.remaining = new_quantity - executed
 
+    def repeg_to(self, price: Ticks | None) -> None:
+        """Reescreve o preço ditado pelo peg; ``None`` manda a ordem para *parked*.
+
+        É a contrapartida de ``amend_to`` para a mudança que **não** parte do cliente. As
+        duas reescrevem preço com a ordem fora de qualquer fila, e por isso compartilham a
+        guarda estrutural; o que as separa é tudo o resto. ``amend_to`` mexe em quantidade e
+        remanescente, e é acompanhada de ``renew_priority`` no chamador, porque o cliente
+        pediu outra ordem. Aqui nada além do preço muda: quantidade, remanescente e
+        ``sequence_id`` seguem intactos, e é essa preservação que faz da reprecificação o
+        cumprimento do contrato que a ordem pegged pediu, em vez de uma alteração a punir.
+        Ver ADR 0004.
+
+        ``None`` é um valor legítimo e não um apagamento: é assim que a ordem sai do livro
+        sem morrer, à espera de que surja uma ordem não-pegged do seu lado para lhe servir
+        de referência. Um método separado para estacionar teria a mesma guarda e o mesmo
+        corpo com outro nome — estacionar **é** reprecificar para preço nenhum.
+        """
+        if self.peg_reference is None:
+            raise OrderIntegrityError(
+                f"ordem {self.order_id} não é pegged e não tem preço ditado pelo livro"
+            )
+        if self.queue is not None:
+            raise OrderIntegrityError(
+                f"ordem {self.order_id} está enfileirada e não pode ser reprecificada no lugar"
+            )
+
+        self.price = price
+
     def renew_priority(self, sequence_id: int) -> None:
         """Troca o número que decide o lugar da ordem na fila.
 

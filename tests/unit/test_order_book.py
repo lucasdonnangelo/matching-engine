@@ -419,6 +419,60 @@ def test_parked_orders_coexist_with_a_populated_book() -> None:
     assert len(book.side(Side.BUY)) == 1
 
 
+def test_merge_ordered_returns_a_block_to_the_side_and_to_the_global_index() -> None:
+    """É ``add`` para um bloco cuja posição na fila importa: as duas baixas, na mesma ordem."""
+    book = OrderBook()
+    resident = book.create_order(Side.BUY, Ticks(1000), 10)
+    book.add(resident)
+    block = [
+        book.create_order(Side.BUY, Ticks(1000), 20, PegReference.BID),
+        book.create_order(Side.BUY, Ticks(1000), 30, PegReference.BID),
+    ]
+
+    book.merge_ordered(block)
+
+    level = book.side(Side.BUY).level_at(Ticks(1000))
+    assert level is not None
+    assert list(level) == [resident, *block]
+    assert all(order.order_id in book for order in block)
+    assert len(book) == 3
+
+
+def test_merge_ordered_puts_an_older_block_ahead_of_what_is_already_queued() -> None:
+    """A pegged reprecificada conserva o ``sequence_id``, e é ele que decide o lugar."""
+    book = OrderBook()
+    older = book.create_order(Side.BUY, Ticks(1000), 20, PegReference.BID)
+    newer = book.create_order(Side.BUY, Ticks(1000), 10)
+    book.add(newer)
+
+    book.merge_ordered([older])
+
+    level = book.side(Side.BUY).level_at(Ticks(1000))
+    assert level is not None
+    assert list(level) == [older, newer]
+
+
+def test_merge_ordered_of_an_empty_block_does_nothing() -> None:
+    book = OrderBook()
+
+    book.merge_ordered([])
+
+    assert len(book) == 0
+
+
+def test_merge_ordered_rejects_an_id_that_is_already_in_the_index() -> None:
+    """Quem reprecifica retira antes de devolver; devolver sem retirar é bug da engine."""
+    book = OrderBook()
+    order = book.create_order(Side.BUY, Ticks(1000), 10, PegReference.BID)
+    book.add(order)
+
+    with pytest.raises(BookIntegrityError, match="já está no índice global"):
+        book.merge_ordered([order])
+
+    assert len(book) == 1
+    assert len(book.side(Side.BUY).pegged_orders) == 1
+
+
 def test_emptying_the_book_returns_it_to_the_initial_state() -> None:
     book = OrderBook()
     orders = [

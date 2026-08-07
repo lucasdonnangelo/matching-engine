@@ -408,6 +408,135 @@ def test_best_non_pegged_price_follows_the_level_losing_its_last_non_pegged_orde
 
 
 @pytest.mark.parametrize("side", SIDES)
+def test_a_side_without_pegged_orders_registers_none(side: Side) -> None:
+    book_side = make_side(side, [Ticks(1000), Ticks(1010)])
+
+    assert book_side.pegged_orders == ()
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_add_and_remove_keep_the_pegged_registry_in_step(side: Side) -> None:
+    """As duas são as únicas portas de um lado, e é isso que torna o registro total."""
+    price = Ticks(1000)
+    book_side = make_side(side, [price])
+    peg = make_pegged_order(99, price, side=side)
+
+    book_side.add(peg)
+    assert book_side.pegged_orders == (peg,)
+
+    book_side.remove(peg)
+    assert book_side.pegged_orders == ()
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_the_pegged_registry_comes_in_sequence_order(side: Side) -> None:
+    """E não na ordem do ``dict``: a reprecificação tira e devolve, e quem volta por último
+    não é quem tem menos prioridade."""
+    price = Ticks(1000)
+    book_side = make_side(side, [price])
+    first = make_pegged_order(10, price, side=side)
+    second = make_pegged_order(20, price, side=side)
+    book_side.add(first)
+    book_side.add(second)
+
+    book_side.remove(first)
+    book_side.add(first)
+
+    assert book_side.pegged_orders == (first, second)
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_the_registry_holds_only_the_pegged_orders_of_this_side(side: Side) -> None:
+    price = Ticks(1000)
+    book_side = make_side(side, [price])
+    peg = make_pegged_order(99, price, side=side)
+    book_side.add(peg)
+
+    book_side.add(make_order(50, price, side=side))
+
+    assert book_side.pegged_orders == (peg,)
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_puts_the_block_in_its_place_and_registers_it(side: Side) -> None:
+    price = Ticks(1000)
+    book_side = BookSide(side)
+    book_side.add(make_order(1, price, side=side))
+    book_side.add(make_order(4, price, side=side))
+    block = [make_pegged_order(2, price, side=side), make_pegged_order(3, price, side=side)]
+
+    book_side.merge_ordered(block)
+
+    level = book_side.level_at(price)
+    assert level is not None
+    assert [order.order_id for order in level] == [1, 2, 3, 4]
+    assert book_side.pegged_orders == tuple(block)
+    assert level.non_pegged_count == 2
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_creates_the_level_when_it_does_not_exist(side: Side) -> None:
+    price = Ticks(1000)
+    book_side = BookSide(side)
+    block = [make_pegged_order(1, price, side=side, quantity=7)]
+
+    book_side.merge_ordered(block)
+
+    level = book_side.level_at(price)
+    assert level is not None
+    assert level.total_quantity == 7
+    assert book_side.best_price == price
+    assert len(book_side) == 1
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_of_an_empty_block_touches_nothing(side: Side) -> None:
+    book_side = make_side(side, [Ticks(1000)])
+
+    book_side.merge_ordered([])
+
+    assert len(book_side) == 1
+    assert book_side.pegged_orders == ()
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_rejects_a_block_of_the_other_side(side: Side) -> None:
+    price = Ticks(1000)
+    book_side = BookSide(side)
+
+    with pytest.raises(LevelIntegrityError, match="não do lado"):
+        book_side.merge_ordered([make_pegged_order(1, price, side=side.opposite)])
+
+    assert book_side.is_empty  # a recusa não deixa nível vazio para trás
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_rejects_a_parked_order(side: Side) -> None:
+    book_side = BookSide(side)
+
+    with pytest.raises(LevelIntegrityError, match="está parked"):
+        book_side.merge_ordered([make_pegged_order(1, None, side=side)])
+
+    assert book_side.is_empty
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_merge_ordered_rejects_a_block_with_more_than_one_price(side: Side) -> None:
+    """O bloco vai para **um** nível; preço divergente alojaria a ordem em nível alheio."""
+    book_side = BookSide(side)
+    block = [
+        make_pegged_order(1, Ticks(1000), side=side),
+        make_pegged_order(2, Ticks(1010), side=side),
+    ]
+
+    with pytest.raises(LevelIntegrityError, match="mais de um preço"):
+        book_side.merge_ordered(block)
+
+    assert book_side.is_empty
+    assert all(order.queue is None for order in block)
+
+
+@pytest.mark.parametrize("side", SIDES)
 def test_sub_tick_prices_sort_by_value(side: Side) -> None:
     """Ordenação é por valor em ticks: "10.1" vem depois de "10", e "9.99" antes dos dois."""
     prices = [parse_price(text) for text in ["10.1", "9.98", "10", "10.5", "9.99"]]

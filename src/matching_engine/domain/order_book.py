@@ -136,6 +136,30 @@ class OrderBook:
         self.side(order.side).add(order)
         self._orders[order.order_id] = order
 
+    def merge_ordered(self, orders: list[Order]) -> None:
+        """Devolve ao livro um bloco de mesmo lado e mesmo preço, já ordenado. O(K + M).
+
+        É ``add`` para um bloco cuja posição na fila importa: a reprecificação de pegged
+        retira as ordens, escreve o preço novo e as reinsere preservando o ``sequence_id`` de
+        cada uma — ver ADR 0004. Uma a uma por ``add``, elas entrariam pelo fim da fila do
+        nível de destino e perderiam a prioridade que a decisão manda preservar.
+
+        A ordem das duas etapas é a de ``add``, e pelo mesmo motivo: o lado aceita o bloco
+        antes de o índice global registrá-lo, porque é o lado que confere lateralidade,
+        preço comum e pertencimento de fila. Registrar antes deixaria no índice global
+        ordens que o livro não guarda em nível nenhum.
+        """
+        if not orders:
+            return
+
+        for order in orders:
+            if order.order_id in self._orders:
+                raise BookIntegrityError(f"order_id {order.order_id} já está no índice global")
+
+        self.side(orders[0].side).merge_ordered(orders)
+        for order in orders:
+            self._orders[order.order_id] = order
+
     def remove(self, order: Order) -> None:
         """Retira a ordem do livro inteiro. O(1) esperado, O(log P) se o nível esvaziar.
 

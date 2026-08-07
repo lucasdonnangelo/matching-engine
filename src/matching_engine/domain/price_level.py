@@ -129,6 +129,33 @@ class PriceLevel:
         if not order.is_pegged:
             self._non_pegged_count += 1
 
+    def merge_ordered(self, orders: list[Order]) -> None:
+        """Insere um bloco já ordenado por ``sequence_id``, mantendo a fila ordenada. O(K + M).
+
+        Passagem para ``OrderQueue.merge_ordered``, que é onde o algoritmo mora e onde ele
+        está justificado. O que este nível acrescenta são as duas contas agregadas, e é por
+        isso que a passagem existe em vez de o chamador alcançar a fila: um bloco enfileirado
+        por fora deixaria ``total_quantity`` e ``non_pegged_count`` descrevendo um nível que
+        já não é este — os itens 3 e 7 dos invariantes, quebrados em silêncio.
+
+        A conferência de preço cobre o **bloco inteiro** antes de qualquer religação, pelo
+        mesmo motivo que leva ``OrderQueue.merge_ordered`` a validar a lista toda antes de
+        inserir: uma recusa no meio deixaria parte das ordens já enfileiradas e parte solta,
+        com as contas do nível refletindo um estado que ninguém pediu.
+        """
+        for order in orders:
+            if order.price != self._price:
+                raise LevelIntegrityError(
+                    f"ordem {order.order_id} tem preço {order.price} e não pertence ao nível "
+                    f"{self._price}"
+                )
+
+        self._queue.merge_ordered(orders)
+        for order in orders:
+            self._total_quantity += order.remaining
+            if not order.is_pegged:
+                self._non_pegged_count += 1
+
     def remove(self, order: Order) -> None:
         """Retira a ordem do nível. O(1).
 

@@ -286,6 +286,95 @@ def test_amend_to_is_rejected_while_the_order_is_in_a_level() -> None:
     assert list(level) == [order]
 
 
+def test_repeg_to_is_rejected_while_the_order_is_in_a_level() -> None:
+    """Mesma razão de ``amend_to``: reprecificar no lugar deixaria a ordem num nível alheio."""
+    level = PriceLevel(LEVEL_PRICE)
+    order = make_pegged_order(1, quantity=10)
+    level.add(order)
+
+    with pytest.raises(OrderIntegrityError, match="está enfileirada"):
+        order.repeg_to(Ticks(2000))
+
+    assert order.price == LEVEL_PRICE
+    assert level.total_quantity == 10
+    assert list(level) == [order]
+
+
+def test_merge_ordered_inserts_the_block_by_sequence_and_sums_the_total() -> None:
+    """O bloco entra no meio da fila: é isso que ``add`` não faz e a reprecificação exige."""
+    level = PriceLevel(LEVEL_PRICE)
+    resident_first = make_order(1, quantity=10)
+    resident_last = make_order(4, quantity=40)
+    level.add(resident_first)
+    level.add(resident_last)
+
+    block = [make_pegged_order(2, quantity=20), make_pegged_order(3, quantity=30)]
+    level.merge_ordered(block)
+
+    assert list(level) == [resident_first, *block, resident_last]
+    assert level.total_quantity == 100
+    assert level.non_pegged_count == 2  # o bloco é pegged e não conta
+
+
+def test_merge_ordered_counts_the_non_pegged_orders_of_the_block() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_pegged_order(1, quantity=10))
+
+    level.merge_ordered([make_order(2, quantity=20), make_pegged_order(3, quantity=30)])
+
+    assert level.non_pegged_count == 1
+    assert level.total_quantity == 60
+    assert len(level) == 3
+
+
+def test_merge_ordered_of_an_empty_block_does_nothing() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_order(1, quantity=10))
+
+    level.merge_ordered([])
+
+    assert level.total_quantity == 10
+    assert len(level) == 1
+
+
+def test_merge_ordered_subtracts_only_what_the_orders_still_have() -> None:
+    """O bloco soma ``remaining``, como ``add``: uma pegged parcialmente executada volta ao
+    livro com o saldo, e não com a quantidade que o cliente enviou."""
+    level = PriceLevel(LEVEL_PRICE)
+    partial = make_pegged_order(1, quantity=10)
+    partial.fill(4)
+
+    level.merge_ordered([partial])
+
+    assert level.total_quantity == 6
+
+
+def test_merge_ordered_rejects_a_block_with_a_price_of_its_own() -> None:
+    """A conferência cobre o bloco inteiro antes de religar qualquer ponteiro."""
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_order(1, quantity=10))
+    block = [make_pegged_order(2, quantity=20), make_pegged_order(3, price=Ticks(2000))]
+
+    with pytest.raises(LevelIntegrityError, match="não pertence ao nível"):
+        level.merge_ordered(block)
+
+    assert list(level) == [level.head]
+    assert level.total_quantity == 10
+    assert all(order.queue is None for order in block)
+
+
+def test_merge_ordered_of_an_out_of_order_block_leaves_the_level_untouched() -> None:
+    level = PriceLevel(LEVEL_PRICE)
+    level.add(make_order(1, quantity=10))
+
+    with pytest.raises(QueueIntegrityError, match="bloco fora de ordem"):
+        level.merge_ordered([make_pegged_order(3, quantity=30), make_pegged_order(2, quantity=20)])
+
+    assert level.total_quantity == 10
+    assert level.non_pegged_count == 1
+    assert len(level) == 1
+
+
 def test_head_is_always_the_oldest_order() -> None:
     level = PriceLevel(LEVEL_PRICE)
     orders = [make_order(i) for i in range(1, 4)]

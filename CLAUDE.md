@@ -105,7 +105,7 @@ Toda operação preserva, e a suíte de propriedade verifica após **cada** coma
 | Cancel | O(1) esperado, + O(log P) se o nível esvaziar |
 | Amend (reduz qty) | O(1) |
 | Amend (preço ou aumenta qty) | O(log P) |
-| Reprecificar pegged | O(K) no caso comum; O(K + M) quando há intercalação real |
+| Reprecificar pegged | O(K log K) no caso comum; O(K log K + M) quando há intercalação real |
 | `print book` | O(N) — inerente à saída |
 | Espaço | O(N + P) |
 
@@ -128,7 +128,15 @@ reprecificada aparece **acima** da limit que provocou a mudança. O linear aqui 
 uma decisão de negócio, não um limite de estrutura de dados, e é cobrado com parcimônia: o
 termo M só aparece quando o topo muda por cancelamento, revelando um nível preexistente
 cujas ordens são mais antigas que parte das pegged. No caso comum, o cursor da fila de
-destino não avança e o custo já é O(K).
+destino não avança e o merge já é O(K).
+
+O fator `log K` da reprecificação não vem do merge, e sim de antes dele: as pegged do lado
+são ordenadas por `sequence_id` ao serem coletadas, em vez de aproveitadas na ordem de
+inserção do registro. A ordem de inserção seria correta hoje, mas por uma cadeia de
+garantias distantes — sequência monotônica, jamais renovada em pegged, preservada através
+do ciclo *park*/*unpark* em três coleções —, e um elo que mude produz fila errada em
+silêncio: o merge valida a ordenação do bloco que recebe, não a cadeia que o formou. A
+ordenação defensiva não depende de nenhum desses elos. Ver `BookSide.pegged_orders`.
 
 ---
 

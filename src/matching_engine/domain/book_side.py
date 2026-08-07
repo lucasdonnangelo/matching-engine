@@ -21,7 +21,7 @@ from collections.abc import Iterator, Sequence
 
 from sortedcontainers import SortedDict
 
-from matching_engine.domain.order import Order
+from matching_engine.domain.order import Order, OrderId
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.price_level import LevelIntegrityError, PriceLevel
 from matching_engine.domain.side import Side
@@ -44,13 +44,17 @@ class BookSide:
     ``_second_index`` é o mesmo raciocínio um passo para dentro: o nível logo atrás do
     topo, ``-2`` no ``BUY`` e ``1`` no ``SELL``. É tudo de que ``best_non_pegged_price``
     precisa, e fixá-lo aqui evita repetir a inversão de lado dentro da consulta.
+
+    ``_pegged`` é o registro das ordens pegged **deste lado que estão no livro**; ver
+    ``pegged_orders``.
     """
 
-    __slots__ = ("_best_index", "_levels", "_second_index", "_side")
+    __slots__ = ("_best_index", "_levels", "_pegged", "_second_index", "_side")
 
     def __init__(self, side: Side) -> None:
         self._side = side
         self._levels: SortedDict[Ticks, PriceLevel] = SortedDict()
+        self._pegged: dict[OrderId, Order] = {}
         self._best_index = -1 if side is Side.BUY else 0
         self._second_index = -2 if side is Side.BUY else 1
 
@@ -129,6 +133,40 @@ class BookSide:
         return second[0]
 
     @property
+    def pegged_orders(self) -> tuple[Order, ...]:
+        """As ordens pegged deste lado que estão no livro, da mais antiga para a mais nova.
+
+        Existe porque a reconciliação precisa alcançá-las sem varrer nível nenhum, e nenhuma
+        outra estrutura daqui entrega isso. As pegged de um lado repousam todas no mesmo
+        preço — é o que o item 7 dos invariantes afirma —, mas o nível em que elas estão
+        divide espaço com as não-pegged que lhes deram a referência, de modo que separá-las
+        custaria O(M) na fila daquele nível. Com M podendo ser muito maior que K, a meta da
+        seção 5 do contrato — O(K) no caso comum — deixaria de valer justamente no caso
+        comum, que é o da limit nova melhorando o topo.
+
+        Só as que estão no livro. As *parked* não têm preço, logo não estão em lado nenhum, e
+        são registradas por ``OrderBook.park``; quem reconcilia junta as duas listas.
+
+        A ordenação é por ``sequence_id``, e não a de inserção do ``dict``, e o custo disso é
+        O(K log K) — a única parte da reconciliação que não é linear em K. O fator log é
+        deliberado. A ordem de inserção também daria a fila certa hoje, mas só por uma cadeia
+        de garantias distantes: o ``sequence_id`` é monotônico, uma pegged nunca o renova, e
+        a ordem de inserção sobrevive ao ciclo *park*/*unpark* atravessando três coleções
+        diferentes. Basta um elo mudar para a fila sair errada **em silêncio**, porque
+        ``merge_ordered`` só confere a ordenação do bloco que recebe, e não a posição dele
+        diante do que já estava no nível.
+
+        O ``sorted`` não depende de nenhuma dessas garantias: ele lê a sequência de cada
+        ordem e é correto por si. É independência de invariante distante comprada por um
+        fator logarítmico sobre um K pequeno — troca que se faz sem hesitar quando a
+        alternativa erra calada.
+
+        Devolve tupla, e não o ``dict`` nem uma vista dele, porque quem reconcilia retira e
+        reinsere as ordens **enquanto** percorre a lista.
+        """
+        return tuple(sorted(self._pegged.values(), key=lambda order: order.sequence_id))
+
+    @property
     def is_empty(self) -> bool:
         """Lado sem nível algum — o que não é o mesmo que lado sem ordens.
 
@@ -164,6 +202,10 @@ class BookSide:
         antes deixaria um nível vazio para trás se a fila recusasse a ordem, e nível vazio
         no índice é a quebra do item 2 dos invariantes: ele apareceria no topo do lado,
         anunciando preço sem quantidade nenhuma por trás.
+
+        O registro de pegged é atualizado por último, e é aqui que ele fica total: ``add`` e
+        ``remove`` são as duas únicas portas por onde uma ordem entra e sai de um lado, então
+        o registro não tem como divergir do livro sem que uma delas seja contornada.
         """
         if order.side is not self._side:
             raise LevelIntegrityError(
@@ -176,13 +218,62 @@ class BookSide:
             )
 
         level = self.level_at(order.price)
-        if level is not None:
+        if level is None:
+            level = PriceLevel(order.price)
             level.add(order)
+            self._levels[order.price] = level
+        else:
+            level.add(order)
+
+        if order.is_pegged:
+            self._pegged[order.order_id] = order
+
+    def merge_ordered(self, orders: list[Order]) -> None:
+        """Insere um bloco de mesmo preço, já ordenado por ``sequence_id``. O(K + M).
+
+        É por aqui que a reprecificação de pegged devolve o bloco ao livro, e o que a separa
+        de ``add`` chamada K vezes é a **posição**: ``add`` enfileira pelo fim, e uma pegged
+        reprecificada mantém o ``sequence_id`` original — ver ADR 0004 e
+        ``OrderQueue.merge_ordered``. Enfileirada pelo fim, ela apareceria abaixo da limit
+        que provocou a mudança de preço, e não acima, contradizendo o exemplo do enunciado.
+
+        O bloco inteiro é conferido antes de qualquer inserção, inclusive quanto ao preço
+        comum: ele vai para **um** nível, e uma ordem de preço divergente no meio da lista
+        seria alojada num nível que não é o dela. Como em ``add``, um nível recém-criado só
+        entra no índice depois de o bloco ser aceito, para que uma recusa não deixe nível
+        vazio para trás.
+        """
+        if not orders:
             return
 
-        level = PriceLevel(order.price)
-        level.add(order)
-        self._levels[order.price] = level
+        price = orders[0].price
+        if price is None:
+            raise LevelIntegrityError(
+                f"ordem {orders[0].order_id} está parked, sem preço, e não pertence ao livro"
+            )
+        for order in orders:
+            if order.side is not self._side:
+                raise LevelIntegrityError(
+                    f"ordem {order.order_id} é do lado {order.side.name} e não do lado "
+                    f"{self._side.name}"
+                )
+            if order.price != price:
+                raise LevelIntegrityError(
+                    f"bloco com mais de um preço: a ordem {order.order_id} está a "
+                    f"{order.price} e o bloco vai para o nível {price}"
+                )
+
+        level = self.level_at(price)
+        if level is None:
+            level = PriceLevel(price)
+            level.merge_ordered(orders)
+            self._levels[price] = level
+        else:
+            level.merge_ordered(orders)
+
+        for order in orders:
+            if order.is_pegged:
+                self._pegged[order.order_id] = order
 
     def remove(self, order: Order) -> None:
         """Retira a ordem do seu nível. O(1) esperado.
@@ -210,6 +301,10 @@ class BookSide:
                 f"ordem {order.order_id} não está em nenhum nível do lado {self._side.name}"
             )
         level.remove(order)
+        # Depois da fila, e não antes: a guarda de pertencimento de ``OrderQueue.remove`` é
+        # que recusa ordem alheia, e uma recusa não pode esvaziar o registro de pegged.
+        if order.is_pegged:
+            del self._pegged[order.order_id]
 
     def remove_if_empty(self, level: PriceLevel) -> None:
         """Tira o nível do índice se ele estiver vazio. O(log P).

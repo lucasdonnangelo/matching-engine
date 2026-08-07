@@ -292,6 +292,49 @@ def test_renew_priority_changes_only_the_place_in_the_queue() -> None:
     assert order.price == SOME_PRICE
 
 
+def test_repeg_to_rewrites_only_the_price() -> None:
+    """A reprecificação parte da engine, não do cliente: sequência e tamanho ficam de pé."""
+    order = make_order(price=SOME_PRICE, quantity=10, peg_reference=PegReference.BID)
+    order.fill(4)
+
+    order.repeg_to(Ticks(1010))
+
+    assert order.price == 1010
+    assert order.sequence_id == 1
+    assert order.quantity == 10
+    assert order.remaining == 6
+    assert not order.is_parked
+
+
+def test_repeg_to_none_parks_the_order() -> None:
+    """Preço nenhum é o estado *parked*, e não apagamento: a ordem segue viva, esperando."""
+    order = make_order(price=SOME_PRICE, peg_reference=PegReference.BID)
+
+    order.repeg_to(None)
+
+    assert order.price is None
+    assert order.is_parked
+    assert order.is_pegged
+
+
+def test_repeg_to_brings_a_parked_order_back_to_a_price() -> None:
+    order = make_order(price=None, peg_reference=PegReference.BID)
+
+    order.repeg_to(SOME_PRICE)
+
+    assert order.price == SOME_PRICE
+    assert not order.is_parked
+
+
+def test_repeg_to_is_rejected_on_an_order_that_is_not_pegged() -> None:
+    order = make_order(price=SOME_PRICE)
+
+    with pytest.raises(OrderIntegrityError, match="não é pegged"):
+        order.repeg_to(Ticks(1010))
+
+    assert order.price == SOME_PRICE
+
+
 @pytest.mark.parametrize(
     ("price", "peg_reference", "pegged", "parked"),
     [
