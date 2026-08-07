@@ -34,12 +34,15 @@ class InterruptedInput(io.StringIO):
 class FailingEngine(MatchingEngine):
     """Engine que falha no ``submit_limit`` com a exceção pedida.
 
-    O dublê existe porque as duas metades da taxonomia da seção 6 do contrato precisam ser
-    exercitadas na fronteira, e nenhuma linha de entrada as alcança hoje. ``ValueError`` do
-    domínio: o parser recusa antes tudo que viraria ``InvalidOrderError`` — quantidade não
-    positiva, preço fora do tick — e o peg cruzado, que é o outro caminho, para no despacho
-    de comando não implementado. ``RuntimeError``: só aparece quando a engine perde a conta
-    das próprias ordens, que é por definição o que não se provoca de fora.
+    O dublê existe porque a metade ``RuntimeError`` da taxonomia da seção 6 do contrato
+    precisa ser exercitada na fronteira, e nenhuma linha de entrada a alcança: ela só aparece
+    quando a engine perde a conta das próprias ordens, que é por definição o que não se
+    provoca de fora.
+
+    A metade ``ValueError`` é exercitada aqui pelo mesmo dublê, mas não depende dele: o peg
+    cruzado chega ao domínio por uma linha de verdade — ver o teste da linha de erro do peg
+    cruzado. O que continua sem caminho de entrada é o resto de ``InvalidOrderError``, porque
+    o parser recusa antes tudo que viraria isso: quantidade não positiva, preço fora do tick.
 
     Herda de ``MatchingEngine`` em vez de imitar a interface para que o ``Cli`` receba o
     tipo que ele de fato espera, e para que o dia em que ele passar a chamar outro método
@@ -159,19 +162,35 @@ def test_an_internal_runtime_error_is_not_swallowed() -> None:
         cli.execute("limit buy 10 100")
 
 
-@pytest.mark.parametrize(
-    ("line", "name"),
-    [
-        ("peg bid buy 100", "peg"),
-        # o peg cruzado também para aqui: a lateralidade é do domínio, que ainda não é
-        # alcançado por este comando
-        ("peg bid sell 100", "peg"),
-    ],
-)
-def test_the_commands_that_are_not_implemented_yet_name_themselves(line: str, name: str) -> None:
+def test_every_command_of_the_grammar_reaches_the_engine() -> None:
+    """Nenhum comando fica sem implementação: a gramática inteira responde de verdade."""
     cli = Cli(MatchingEngine())
 
-    assert cli.execute(line) == [f"Error: comando ainda não implementado: {name}"]
+    assert cli.execute("limit buy 10 100") == ["Order created: buy 100 @ 10 1"]
+    assert cli.execute("peg bid buy 50") == ["Order pegged: buy 50 @ 10 2"]
+    # a market atinge a limit, que está na frente da fila; a pegged segue intocada atrás dela
+    assert cli.execute("market sell 20") == ["Trade, price: 10, qty: 20"]
+    # 100 com 20 executados, reduzida para 60: sobram 40 de saldo
+    assert cli.execute("modify order 1 qty 60") == ["Order amended: buy 40 @ 10 1"]
+    assert cli.execute("cancel order 2") == ["Order cancelled"]
+    assert cli.execute("print book") == [
+        "Ordens de Compra | Ordens de Venda",
+        "-----------------|----------------",
+        "40 @ 10          |",
+    ]
+    assert cli.execute("quit") == []
+
+
+@pytest.mark.parametrize("line", ["peg bid sell 100", "peg offer buy 100"])
+def test_a_crossed_peg_is_an_error_line_from_the_domain(line: str) -> None:
+    """A lateralidade é regra da ``Order``, e a linha de erro é a mensagem dela, sem reembalar."""
+    cli = Cli(MatchingEngine())
+
+    lines = cli.execute(line)
+
+    assert len(lines) == 1
+    assert lines[0].startswith("Error: peg cruzado: ")
+    assert not cli.should_quit
 
 
 def test_create_then_cancel_as_the_statement_shows() -> None:

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from matching_engine.domain.order import OrderId
 from matching_engine.domain.price import Ticks
-from matching_engine.domain.side import Side
+from matching_engine.domain.side import PegReference, Side
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +130,39 @@ class OrderAmended:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderPegged:
+    """Ordem pegged que passou a valer a um preço ditado pelo livro — ou a preço nenhum.
+
+    Um só evento relata os dois acontecimentos da vida de uma pegged: a entrada, quando o
+    cliente a envia, e cada reprecificação, quando o topo não-pegged do seu lado se move.
+    Separá-los em dois tipos seria distinguir o que o cliente não distingue — em ambos os
+    casos o fato é o mesmo, *esta ordem agora vale este preço* —, e o presenter teria dois
+    ramos produzindo a mesma linha.
+
+    ``price`` é opcional, e o ``None`` é o estado *parked*: a ordem está viva, o cliente pode
+    cancelá-la pelo id, mas não existe ordem não-pegged do seu lado para lhe servir de
+    referência, e por isso ela espera fora dos dois lados do livro. Não é ausência de
+    informação; é a informação. Ver ``OrderBook.park``.
+
+    ``quantity`` é o remanescente, como em ``OrderAccepted`` e ``OrderAmended``: uma pegged
+    parcialmente executada é reprecificada com o saldo que sobrou, e é esse saldo que passa a
+    ser oferecido ao preço novo.
+
+    ``reference`` não aparece na saída, e está aqui pela mesma razão de ``priority_renewed``
+    em ``OrderAmended``: sem ela, o histórico registra que uma ordem passou a valer 10 sem
+    dizer que contrato ela está cumprindo — e é o contrato que explica por que ela vai se
+    mover de novo quando o topo se mover. Que ela seja sempre homolateral ao ``side`` é
+    invariante da ``Order``, não redundância: o evento relata o que a ordem é.
+    """
+
+    order_id: OrderId
+    side: Side
+    reference: PegReference
+    price: Ticks | None
+    quantity: int
+
+
+@dataclass(frozen=True, slots=True)
 class BookEntry:
     """Uma ordem viva na visualização do livro: o que resta dela, ao preço em que está.
 
@@ -164,5 +197,5 @@ class BookSnapshot:
     asks: tuple[BookEntry, ...]
 
 
-type Event = Trade | OrderAccepted | OrderCancelled | OrderAmended | BookSnapshot
+type Event = Trade | OrderAccepted | OrderCancelled | OrderAmended | OrderPegged | BookSnapshot
 """Tudo que a engine pode devolver de um comando."""

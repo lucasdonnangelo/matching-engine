@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import pytest
 
@@ -10,12 +10,13 @@ from matching_engine.domain.events import (
     OrderAccepted,
     OrderAmended,
     OrderCancelled,
+    OrderPegged,
     Trade,
 )
-from matching_engine.domain.order import Order, OrderId
+from matching_engine.domain.order import InvalidOrderError, Order, OrderId
 from matching_engine.domain.price import Ticks
 from matching_engine.domain.price_level import PriceLevel
-from matching_engine.domain.side import Side
+from matching_engine.domain.side import PegReference, Side
 
 SIDES = list(Side)
 
@@ -30,6 +31,10 @@ def acceptances_of(events: Sequence[Event]) -> list[OrderAccepted]:
 
 def amendments_of(events: Sequence[Event]) -> list[OrderAmended]:
     return [event for event in events if isinstance(event, OrderAmended)]
+
+
+def pegs_of(events: Sequence[Event]) -> list[OrderPegged]:
+    return [event for event in events if isinstance(event, OrderPegged)]
 
 
 def traded_by_price(events: Sequence[Event]) -> dict[Ticks, int]:
@@ -49,8 +54,33 @@ def resting(engine: MatchingEngine, side: Side, price: Ticks, quantity: int) -> 
     return order
 
 
+def pegged(engine: MatchingEngine, side: Side, quantity: int) -> Order:
+    """Envia uma pegged homolateral — a única admitida — e devolve a ordem viva."""
+    reference = PegReference.BID if side is Side.BUY else PegReference.OFFER
+    [event] = pegs_of(engine.submit_pegged(reference, side, quantity))
+    order = engine.book.get(event.order_id)
+    assert order is not None
+    return order
+
+
+def improved(side: Side, price: Ticks, by: int = 10) -> Ticks:
+    """Preço um passo melhor para este lado: acima no bid, abaixo na offer."""
+    return Ticks(price + by) if side is Side.BUY else Ticks(price - by)
+
+
 def top_of(engine: MatchingEngine, side: Side) -> Ticks | None:
     return engine.book.best_bid if side is Side.BUY else engine.book.best_ask
+
+
+def assert_no_pegged_only_level(engine: MatchingEngine) -> None:
+    """Item 7 dos invariantes na forma em que ele se apresenta em repouso — ver o teste."""
+    for side in SIDES:
+        book_side = engine.book.side(side)
+        only_pegged = [level for level in book_side if level.non_pegged_count == 0]
+        assert len(only_pegged) <= 1, f"lado {side.name} com mais de um nível só de pegged"
+        if only_pegged:
+            assert only_pegged[0] is book_side.best_level
+        assert only_pegged == []
 
 
 def level_of(engine: MatchingEngine, side: Side, price: Ticks) -> PriceLevel:
@@ -726,6 +756,351 @@ def test_the_book_is_never_left_crossed_after_an_amend() -> None:
 
     assert engine.book.best_bid == 1100
     assert engine.book.best_ask is None
+
+
+def test_a_pegged_order_enters_behind_the_orders_already_at_the_reference_price() -> None:
+    """A pegged que **chega** é a ordem mais nova do livro; a que é reprecificada é que
+    conserva o lugar. No exemplo do enunciado ela entra atrás dos 200 @ 10."""
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 200)
+    second = resting(engine, Side.BUY, Ticks(1000), 100)
+
+    peg = pegged(engine, Side.BUY, 150)
+
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert list(level) == [first, second, peg]
+    assert level.total_quantity == 450
+    assert level.non_pegged_count == 2
+    assert peg.price == 1000
+    assert engine.book.best_bid == 1000
+
+
+def test_the_example_of_requirement_5() -> None:
+    """A limit nova melhora o topo, a pegged sobe com ela e fica **acima** dela.
+
+    A pegged já estava no livro quando a limit chegou, e reprecificar não é reenviar: o
+    ``sequence_id`` é preservado, então ela continua na frente de quem chegou depois.
+    """
+    engine = MatchingEngine()
+    limit = resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+    assert list(level_of(engine, Side.BUY, Ticks(1000))) == [limit, peg]
+    sequence_id = peg.sequence_id
+
+    events = engine.submit_limit(Side.BUY, Ticks(1010), 300)
+
+    assert pegs_of(events) == [
+        OrderPegged(
+            order_id=peg.order_id,
+            side=Side.BUY,
+            reference=PegReference.BID,
+            price=Ticks(1010),
+            quantity=150,
+        )
+    ]
+    assert peg.sequence_id == sequence_id
+    assert snapshot_of(engine).bids == (
+        BookEntry(quantity=150, price=Ticks(1010)),
+        BookEntry(quantity=300, price=Ticks(1010)),
+        BookEntry(quantity=200, price=Ticks(1000)),
+    )
+
+
+def test_a_pegged_order_already_at_the_reference_price_is_not_touched() -> None:
+    """Retirar e reinserir devolveria o mesmo livro por acidente, ao custo de K remoções."""
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+    sequence_id = peg.sequence_id
+
+    events = engine.submit_limit(Side.BUY, Ticks(1000), 100)
+
+    assert pegs_of(events) == []
+    [accepted] = acceptances_of(events)
+    assert list(level_of(engine, Side.BUY, Ticks(1000))) == [
+        first,
+        peg,
+        engine.book.get(accepted.order_id),
+    ]
+    assert peg.sequence_id == sequence_id
+
+
+def test_cancelling_the_top_lowers_the_pegged_into_the_level_below() -> None:
+    """Aqui há intercalação de verdade: o nível de destino já existia e guarda uma ordem
+    **mais nova** que a pegged, que por isso entra no meio da fila e não no fim dela."""
+    engine = MatchingEngine()
+    oldest = resting(engine, Side.BUY, Ticks(1000), 200)
+    top = resting(engine, Side.BUY, Ticks(1010), 300)
+    peg = pegged(engine, Side.BUY, 150)
+    newest = resting(engine, Side.BUY, Ticks(1000), 100)
+    assert list(level_of(engine, Side.BUY, Ticks(1010))) == [top, peg]
+
+    events = engine.cancel(top.order_id)
+
+    [lowered] = pegs_of(events)
+    assert lowered.order_id == peg.order_id
+    assert lowered.price == 1000
+    assert engine.book.side(Side.BUY).level_at(Ticks(1010)) is None
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert list(level) == [oldest, peg, newest]
+    assert level.total_quantity == 450
+    assert engine.book.best_bid == 1000
+
+
+def test_a_pegged_order_without_a_reference_is_parked() -> None:
+    """Sem não-pegged do seu lado não há a que se ancorar; descartá-la perderia a intenção."""
+    engine = MatchingEngine()
+
+    events = engine.submit_pegged(PegReference.BID, Side.BUY, 150)
+
+    assert events == [
+        OrderPegged(
+            order_id=OrderId(1),
+            side=Side.BUY,
+            reference=PegReference.BID,
+            price=None,
+            quantity=150,
+        )
+    ]
+    order = engine.book.get(OrderId(1))
+    assert order is not None
+    assert order.is_parked
+    assert engine.book.side(Side.BUY).is_empty
+    assert engine.book.best_bid is None
+    assert len(engine.book) == 1
+
+
+def test_a_parked_pegged_order_comes_back_when_a_reference_appears() -> None:
+    """E volta **à frente** da limit que lhe deu referência: ela chegou antes, e a sequência
+    guardada é que decide. É o mesmo motivo pelo qual a pegged reprecificada sobe na fila."""
+    engine = MatchingEngine()
+    peg = pegged(engine, Side.BUY, 150)
+    assert peg.is_parked
+
+    events = engine.submit_limit(Side.BUY, Ticks(1000), 200)
+
+    [accepted] = acceptances_of(events)
+    [reactivated] = pegs_of(events)
+    assert reactivated.order_id == peg.order_id
+    assert reactivated.price == 1000
+    assert reactivated.quantity == 150
+    assert not peg.is_parked
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert list(level) == [peg, engine.book.get(accepted.order_id)]
+    assert level.total_quantity == 350
+    assert len(engine.book) == 2
+
+
+def test_a_parked_pegged_order_can_be_cancelled() -> None:
+    """Ela está viva e é achada pelo id como qualquer outra — é para isso que ``park`` a
+    mantém no índice global."""
+    engine = MatchingEngine()
+    peg = pegged(engine, Side.BUY, 150)
+
+    events = engine.cancel(peg.order_id)
+
+    assert events == [
+        OrderCancelled(order_id=peg.order_id, side=Side.BUY, price=None, remaining=150)
+    ]
+    assert peg.order_id not in engine.book
+    assert len(engine.book) == 0
+
+
+def test_several_pegged_orders_share_the_price_and_keep_their_order_among_themselves() -> None:
+    engine = MatchingEngine()
+    resting(engine, Side.BUY, Ticks(1000), 200)
+    first = pegged(engine, Side.BUY, 100)
+    second = pegged(engine, Side.BUY, 50)
+
+    events = engine.submit_limit(Side.BUY, Ticks(1010), 300)
+
+    [accepted] = acceptances_of(events)
+    lifted = pegs_of(events)
+    assert [event.order_id for event in lifted] == [first.order_id, second.order_id]
+    assert [event.price for event in lifted] == [Ticks(1010), Ticks(1010)]
+    level = level_of(engine, Side.BUY, Ticks(1010))
+    assert list(level) == [first, second, engine.book.get(accepted.order_id)]
+    assert level.total_quantity == 450
+
+
+def test_a_pegged_order_is_filled_by_an_aggressor_like_any_other() -> None:
+    """Ela repousa num nível e é consumida pela fila, sem nada de especial no matching. O que
+    a distingue vem depois: sumida a não-pegged que lhe dava referência, ela vai para parked
+    em vez de ficar sozinha anunciando um preço que já não tem quem o sustente."""
+    engine = MatchingEngine()
+    limit = resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+
+    events = engine.submit_market(Side.SELL, 300)
+
+    assert trades_of(events) == [
+        Trade(
+            price=Ticks(1000),
+            quantity=200,
+            maker_order_id=limit.order_id,
+            taker_side=Side.SELL,
+        ),
+        Trade(
+            price=Ticks(1000),
+            quantity=100,
+            maker_order_id=peg.order_id,
+            taker_side=Side.SELL,
+        ),
+    ]
+    [parked] = pegs_of(events)
+    assert parked.order_id == peg.order_id
+    assert parked.price is None
+    assert parked.quantity == 50
+    assert peg.is_parked
+    assert peg.remaining == 50
+    assert engine.book.side(Side.BUY).is_empty
+    assert len(engine.book) == 1
+
+
+def test_a_partially_filled_pegged_order_keeps_its_place_when_repriced() -> None:
+    engine = MatchingEngine()
+    resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+    behind = resting(engine, Side.BUY, Ticks(1000), 100)
+
+    engine.submit_market(Side.SELL, 250)
+    assert peg.remaining == 100
+    assert list(level_of(engine, Side.BUY, Ticks(1000))) == [peg, behind]
+
+    events = engine.submit_limit(Side.BUY, Ticks(1010), 300)
+
+    [lifted] = pegs_of(events)
+    assert lifted.quantity == 100  # o saldo, e não os 150 enviados
+    assert lifted.price == 1010
+    level = level_of(engine, Side.BUY, Ticks(1010))
+    assert level.head is peg  # continua à frente da limit que provocou a mudança
+    assert level.total_quantity == 400
+    assert peg.remaining == 100
+
+
+@pytest.mark.parametrize(
+    ("reference", "side"),
+    [(PegReference.BID, Side.SELL), (PegReference.OFFER, Side.BUY)],
+    ids=["peg bid numa venda", "peg offer numa compra"],
+)
+def test_a_crossed_peg_is_rejected(reference: PegReference, side: Side) -> None:
+    """Ela assumiria o preço do lado oposto: marketable ao nascer, e reprecificada para o
+    novo topo oposto a cada movimento — uma market disfarçada num laço."""
+    engine = MatchingEngine()
+
+    with pytest.raises(InvalidOrderError, match="peg cruzado"):
+        engine.submit_pegged(reference, side, 150)
+
+    assert len(engine.book) == 0
+    # a construção recusada não queima id nem número de sequência
+    [accepted] = acceptances_of(engine.submit_limit(Side.BUY, Ticks(1000), 100))
+    assert accepted.order_id == 1
+
+
+def test_repricing_never_produces_a_trade() -> None:
+    """A prova de terminação, como teste.
+
+    O peg é homolateral, então o preço assumido é o topo do **próprio** lado, que pelo item 1
+    dos invariantes é estritamente melhor que o topo oposto: a reprecificação não cruza o
+    spread, e nenhum ``Trade`` sai dela. As duas limits do roteiro repousam sem executar, de
+    modo que qualquer trade nestes eventos só poderia ter vindo da reconciliação.
+    """
+    engine = MatchingEngine()
+    resting(engine, Side.BUY, Ticks(1000), 200)
+    resting(engine, Side.SELL, Ticks(1100), 200)
+    buy_peg = pegged(engine, Side.BUY, 150)
+    sell_peg = pegged(engine, Side.SELL, 150)
+
+    for side, price in [(Side.BUY, Ticks(1050)), (Side.SELL, Ticks(1060))]:
+        events = engine.submit_limit(side, price, 100)
+
+        assert trades_of(events) == []
+        assert pegs_of(events) != []
+        assert_no_pegged_only_level(engine)
+
+    assert buy_peg.price == 1050
+    assert sell_peg.price == 1060
+    assert level_of(engine, Side.BUY, Ticks(1050)).head is buy_peg
+    assert level_of(engine, Side.SELL, Ticks(1060)).head is sell_peg
+
+
+@pytest.mark.parametrize("side", SIDES)
+def test_a_pegged_order_follows_the_top_of_its_own_side(side: Side) -> None:
+    engine = MatchingEngine()
+    resting(engine, side, Ticks(1000), 200)
+    resting(engine, side.opposite, improved(side, Ticks(1000), by=500), 200)
+    peg = pegged(engine, side, 150)
+    assert peg.price == 1000
+
+    engine.submit_limit(side, improved(side, Ticks(1000)), 300)
+
+    assert peg.price == improved(side, Ticks(1000))
+    assert top_of(engine, side) == improved(side, Ticks(1000))
+    assert level_of(engine, side, improved(side, Ticks(1000))).head is peg
+
+
+def test_no_level_is_left_holding_only_pegged_orders() -> None:
+    """Item 7 dos invariantes, na forma em que ele se apresenta em repouso: **nenhum**.
+
+    O "no máximo um" do contrato descreve a janela transitória que ``best_non_pegged_price``
+    precisa saber ler — o instante entre a saída da última não-pegged de um nível e a
+    reconciliação que tira as pegged de lá. Ao fim de cada comando essa janela já fechou, e é
+    por isso que o que se verifica aqui é a forma mais forte. O roteiro abre a janela três
+    vezes: cancelando a não-pegged que dá referência, executando-a, e esvaziando o lado.
+    """
+    engine = MatchingEngine()
+    first = resting(engine, Side.BUY, Ticks(1000), 200)
+    second = resting(engine, Side.BUY, Ticks(990), 100)
+    pegged(engine, Side.BUY, 150)
+    script: list[Callable[[], list[Event]]] = [
+        lambda: engine.submit_limit(Side.BUY, Ticks(1010), 300),
+        lambda: engine.cancel(first.order_id),
+        lambda: engine.submit_market(Side.SELL, 300),
+        lambda: engine.cancel(second.order_id),
+        lambda: engine.submit_limit(Side.BUY, Ticks(1020), 100),
+    ]
+
+    for command in script:
+        command()
+        assert_no_pegged_only_level(engine)
+
+
+def test_the_book_is_never_left_crossed_with_pegged_orders() -> None:
+    engine = MatchingEngine()
+    script: list[Callable[[], list[Event]]] = [
+        lambda: engine.submit_limit(Side.BUY, Ticks(1000), 200),
+        lambda: engine.submit_limit(Side.SELL, Ticks(1100), 200),
+        lambda: engine.submit_pegged(PegReference.BID, Side.BUY, 150),
+        lambda: engine.submit_pegged(PegReference.OFFER, Side.SELL, 150),
+        lambda: engine.submit_limit(Side.BUY, Ticks(1050), 100),
+        lambda: engine.submit_limit(Side.SELL, Ticks(1060), 100),
+        lambda: engine.submit_market(Side.SELL, 500),  # varre o bid e desfaz a referência
+        lambda: engine.submit_limit(Side.BUY, Ticks(1070), 300),  # cruza o que restou da offer
+        lambda: engine.submit_market(Side.BUY, 900),
+        lambda: engine.submit_limit(Side.SELL, Ticks(1000), 100),
+    ]
+
+    for command in script:
+        command()
+
+        best_bid, best_ask = engine.book.best_bid, engine.book.best_ask
+        assert best_bid is None or best_ask is None or best_bid < best_ask
+        assert_no_pegged_only_level(engine)
+
+
+def test_a_reentrant_reconciliation_fails_loudly() -> None:
+    """Tripwire da prova de terminação, e não defesa contra um caminho existente.
+
+    Hoje nada na reconciliação chama de volta a engine — é exatamente isso que a prova
+    afirma —, então a condição precisa ser forçada de fora para ser exercitada. Se um dia ela
+    passar a acontecer sozinha, a prova estará quebrada, e falhar alto é melhor do que um
+    laço infinito ou uma cascata que termina por sorte.
+    """
+    engine = MatchingEngine()
+    engine._reconciling = True
+
+    with pytest.raises(RuntimeError, match="reentrante"):
+        engine.submit_limit(Side.BUY, Ticks(1000), 100)
 
 
 def test_snapshot_of_an_empty_book_has_no_entries() -> None:

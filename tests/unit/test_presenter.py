@@ -7,11 +7,12 @@ from matching_engine.domain.events import (
     OrderAccepted,
     OrderAmended,
     OrderCancelled,
+    OrderPegged,
     Trade,
 )
 from matching_engine.domain.order import OrderId
 from matching_engine.domain.price import Ticks
-from matching_engine.domain.side import Side
+from matching_engine.domain.side import PegReference, Side
 from matching_engine.io.presenter import format_events
 
 
@@ -43,6 +44,21 @@ def amended(
         price=Ticks(price),
         quantity=quantity,
         priority_renewed=priority_renewed,
+    )
+
+
+def peg(
+    price: int | None,
+    quantity: int,
+    side: Side = Side.BUY,
+    order_id: int = 1,
+) -> OrderPegged:
+    return OrderPegged(
+        order_id=OrderId(order_id),
+        side=side,
+        reference=PegReference.BID if side is Side.BUY else PegReference.OFFER,
+        price=None if price is None else Ticks(price),
+        quantity=quantity,
     )
 
 
@@ -115,6 +131,57 @@ def test_an_amend_that_executes_prints_its_fills_and_then_its_remainder() -> Non
         "Trade, price: 20, qty: 100",
         "Order amended: buy 50 @ 20 2",
     ]
+
+
+@pytest.mark.parametrize(
+    ("side", "expected"),
+    [
+        (Side.BUY, "Order pegged: buy 150 @ 10.1 2"),
+        (Side.SELL, "Order pegged: sell 150 @ 10.1 2"),
+    ],
+)
+def test_a_pegged_order_mirrors_the_created_line_with_the_verb_changed(
+    side: Side, expected: str
+) -> None:
+    """O enunciado não especifica saída para pegged; espelhar o que já existe é a escolha."""
+    assert format_events([peg(1010, 150, side=side, order_id=2)]) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("side", "expected"),
+    [
+        (Side.BUY, "Order pegged: buy 150 parked 2"),
+        (Side.SELL, "Order pegged: sell 150 parked 2"),
+    ],
+)
+def test_a_parked_pegged_order_says_parked_where_the_price_would_be(
+    side: Side, expected: str
+) -> None:
+    """Sem referência não há preço, e ``parked`` é a resposta à pergunta que o ``@`` faria."""
+    assert format_events([peg(None, 150, side=side, order_id=2)]) == [expected]
+
+
+def test_a_repriced_pegged_order_prints_the_same_line_again_with_the_same_id() -> None:
+    """É como a tela conta que a ordem mudou de preço sozinha: mesma ordem, preço novo."""
+    events: list[Event] = [peg(1000, 150, order_id=2), peg(1010, 150, order_id=2)]
+
+    assert format_events(events) == [
+        "Order pegged: buy 150 @ 10 2",
+        "Order pegged: buy 150 @ 10.1 2",
+    ]
+
+
+def test_the_pegged_line_does_not_show_the_reference() -> None:
+    """O efeito da referência é o preço que a ordem assume, e ele já está na linha."""
+    bid = OrderPegged(
+        order_id=OrderId(1),
+        side=Side.BUY,
+        reference=PegReference.BID,
+        price=Ticks(1000),
+        quantity=100,
+    )
+
+    assert format_events([bid]) == ["Order pegged: buy 100 @ 10 1"]
 
 
 @pytest.mark.parametrize(
@@ -286,6 +353,8 @@ def test_every_event_type_closes_the_pending_run_of_trades() -> None:
         trade(2000, 30),
         amended(998, 70, side=Side.BUY, order_id=6),
         trade(2000, 40),
+        peg(1000, 80, order_id=7),
+        trade(2000, 50),
         book(bids=[(50, 1000)], asks=[]),
     ]
 
@@ -297,6 +366,8 @@ def test_every_event_type_closes_the_pending_run_of_trades() -> None:
         "Trade, price: 20, qty: 30",
         "Order amended: buy 70 @ 9.98 6",
         "Trade, price: 20, qty: 40",
+        "Order pegged: buy 80 @ 10 7",
+        "Trade, price: 20, qty: 50",
         "Ordens de Compra | Ordens de Venda",
         "-----------------|----------------",
         "50 @ 10          |",

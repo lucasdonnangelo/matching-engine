@@ -4,8 +4,11 @@ O livro guarda, indexa e devolve topos; nada nele sabe que uma compra encontra u
 Essa decisão — contra quem, a que preço, em que quantidade e em que ordem — mora aqui, e
 sai como ``list[Event]``, nunca como texto.
 
-Esta etapa cobre submissão, cancelamento, alteração e visualização. Faltam as ordens
-pegged, que entram depois sobre a mesma estrutura e sem tocar no laço de matching.
+A engine cobre submissão, cancelamento, alteração, visualização e ordens pegged. As pegged
+entraram sobre a mesma estrutura e **sem tocar no laço de matching**: elas repousam em
+níveis como qualquer outra ordem e são executadas como qualquer outra: o que elas
+acrescentam é a reconciliação ao fim de cada comando, que as reprecifica quando o topo
+não-pegged do seu lado se move. Ver ``_reconcile_pegged`` e a ADR 0004.
 """
 
 from __future__ import annotations
@@ -17,12 +20,13 @@ from matching_engine.domain.events import (
     OrderAccepted,
     OrderAmended,
     OrderCancelled,
+    OrderPegged,
     Trade,
 )
-from matching_engine.domain.order import OrderId
+from matching_engine.domain.order import Order, OrderId, OrderIntegrityError
 from matching_engine.domain.order_book import BookIntegrityError, OrderBook
 from matching_engine.domain.price import Ticks
-from matching_engine.domain.side import Side
+from matching_engine.domain.side import PegReference, Side
 
 
 class OrderNotFoundError(ValueError):
@@ -64,10 +68,11 @@ class MatchingEngine:
     de eventos deixaria de explicar o estado do livro.
     """
 
-    __slots__ = ("_book",)
+    __slots__ = ("_book", "_reconciling")
 
     def __init__(self) -> None:
         self._book = OrderBook()
+        self._reconciling = False
 
     @property
     def book(self) -> OrderBook:
@@ -79,11 +84,49 @@ class MatchingEngine:
 
         Cruzar o spread é execução, não erro — ver ADR 0001.
         """
-        return self._submit(side, price, quantity, rest=True)
+        return [*self._submit(side, price, quantity, rest=True), *self._reconcile_pegged_sides()]
 
     def submit_market(self, side: Side, quantity: int) -> list[Event]:
         """Insere uma market: executa a qualquer preço e descarta o que não executar."""
-        return self._submit(side, None, quantity, rest=False)
+        return [*self._submit(side, None, quantity, rest=False), *self._reconcile_pegged_sides()]
+
+    def submit_pegged(self, reference: PegReference, side: Side, quantity: int) -> list[Event]:
+        """Insere uma pegged: ela nasce ao melhor preço não-pegged do seu lado, ou *parked*.
+
+        **O peg é apenas homolateral** — ``bid`` com ``buy``, ``offer`` com ``sell`` —, e o
+        cruzado não é recusado aqui: quem o recusa é a construção da ``Order``, e a exceção
+        sobe. Uma ordem com peg cruzado — ``peg offer`` numa compra — assumiria o preço do
+        **lado oposto**, isto é, a compra passaria a valer a melhor oferta de venda. Esse
+        preço cruza o spread por definição, então a ordem seria marketable no instante em que
+        nascesse: uma market disfarçada, com o agravante de que o remanescente repousaria e
+        seria reprecificado para o novo topo oposto a cada movimento, executando de novo.
+        Não é um tipo de ordem exótico a suportar, é um laço de reprecificação e execução que
+        o cliente não pediu — e o custo de barrá-lo é uma comparação na construção.
+
+        O preço vem de ``best_non_pegged_price``, e não do topo bruto do lado, pelo motivo
+        registrado na seção 3 do contrato: uma pegged que se ancorasse no topo bruto se
+        ancoraria no preço que outra pegged acabou de assumir, e a reprecificação deixaria de
+        terminar numa passada. Ver a prova em ``_reconcile_pegged``.
+
+        Sem referência, a ordem nasce *parked*: viva, encontrável e cancelável pelo id, mas
+        fora dos dois lados, à espera de que apareça uma não-pegged do seu lado. Descartá-la
+        perderia a intenção do cliente, e inventar um preço mentiria sobre o livro.
+
+        **Ela entra pelo fim da fila do nível de referência**, por ``add``, e não pelo merge
+        ordenado da reprecificação. Os dois casos são diferentes e é o exemplo do enunciado
+        que os separa: a pegged que **chega** é a ordem mais nova do livro e se enfileira
+        atrás de quem já estava no preço — atrás dos 200 @ 10 —, ao passo que a pegged que é
+        **reprecificada** já estava no livro antes e conserva a prioridade que tinha. A
+        primeira paga tempo porque acabou de chegar; a segunda não mudou de ideia.
+        """
+        price = self._book.side(side).best_non_pegged_price
+        order = self._book.create_order(side, price, quantity, peg_reference=reference)
+        if price is None:
+            self._book.park(order)
+        else:
+            self._book.add(order)
+
+        return [self._pegged_event(order), *self._reconcile_pegged_sides()]
 
     def cancel(self, order_id: OrderId) -> list[Event]:
         """Retira do livro a ordem viva daquele id. O(1) esperado, O(log P) se o nível esvaziar.
@@ -113,7 +156,7 @@ class MatchingEngine:
             remaining=order.remaining,
         )
         self._book.remove(order)
-        return [cancelled]
+        return [cancelled, *self._reconcile_pegged_sides()]
 
     def amend(
         self, order_id: OrderId, new_price: Ticks | None, new_quantity: int | None
@@ -240,7 +283,8 @@ class MatchingEngine:
                     price=current_price,
                     quantity=order.remaining,
                     priority_renewed=False,
-                )
+                ),
+                *self._reconcile_pegged_sides(),
             ]
 
         self._book.remove(order)
@@ -263,6 +307,7 @@ class MatchingEngine:
                     priority_renewed=True,
                 )
             )
+        events.extend(self._reconcile_pegged_sides())
         return events
 
     def snapshot(self) -> list[Event]:
@@ -292,6 +337,190 @@ class MatchingEngine:
             BookEntry(quantity=order.remaining, price=level.price)
             for level in self._book.side(side)
             for order in level
+        )
+
+    def _reconcile_pegged_sides(self) -> list[Event]:
+        """Reconcilia os dois lados, na ordem em que o livro é lido, e concatena os eventos.
+
+        Os dois, e não só o lado que o comando tocou, porque um comando atinge os dois: uma
+        agressiva de compra consome ofertas e pode desfazer a referência das pegged do lado
+        **vendedor**, que é o oposto ao da ordem enviada. Escolher o lado a reconciliar a
+        partir do comando exigiria, em cada um deles, um raciocínio sobre qual lado mudou —
+        raciocínio que erra em silêncio, e cujo erro só aparece como pegged parada no preço
+        errado muitos comandos depois. Reconciliar os dois é O(1) quando não há pegged: as
+        duas listas vêm vazias e a função devolve sem tocar no livro.
+        """
+        return [*self._reconcile_pegged(Side.BUY), *self._reconcile_pegged(Side.SELL)]
+
+    def _reconcile_pegged(self, side: Side) -> list[Event]:
+        """Põe toda pegged deste lado no melhor preço não-pegged dele, ou *parked*.
+
+        Chamada ao fim de **todo** comando que possa mudar o topo — submit, cancel, amend e a
+        própria submissão de pegged —, para os dois lados.
+
+        **Prova de terminação em uma passada.** A referência é o melhor preço entre as ordens
+        **não**-pegged do lado; esta reconciliação move exclusivamente ordens pegged; logo
+        ela não altera a própria referência, e não tem como disparar a si mesma. O único
+        efeito colateral que ela produz sobre o índice de preços é esvaziar o nível de origem
+        e, quando esse nível era pegged-only, retirá-lo — o que aproxima do topo justamente o
+        nível de referência, sem trocá-lo por outro. Depois de uma passada, o melhor preço
+        não-pegged é o mesmo de antes dela, e toda pegged está nele: ponto fixo alcançado em
+        uma iteração, não por convergência mas por construção.
+
+        **E a reprecificação nunca dispara matching.** Como o peg é homolateral, o preço
+        assumido é o topo do **próprio** lado, que pelo item 1 dos invariantes é estritamente
+        melhor que o topo do lado oposto — um bid nunca alcança a melhor offer só por subir
+        até o melhor bid. A pegged reprecificada, portanto, não cruza o spread, e nenhum
+        ``Trade`` sai daqui. Sem cascata, sem reentrância, sem fila de eventos: a lista de
+        eventos que esta função devolve é finita e conhecida antes do fim da passada. É o peg
+        cruzado que quebraria isso, e é por isso que ele é barrado na construção da ``Order``
+        — ver ``submit_pegged``.
+
+        **Por que síncrona, e não Observer.** A alternativa natural seria o livro notificar
+        listeners a cada mudança de topo. Ela dispara no pior instante possível: uma mudança
+        de topo acontece *dentro* de ``OrderBook.remove``, entre a saída da ordem do nível e
+        a saída do nível vazio do índice de preços — o listener veria um livro em estado
+        transitório, com nível vazio ainda indexado, e reprecificaria contra ele. Pior, o
+        listener mexe no livro, e mexer no livro dispara o listener: a reentrância deixaria
+        de ser hipótese. Reconciliar ao fim do comando torna cada comando **atômico** do
+        ponto de vista do cliente — ele nunca observa um livro meio reconciliado —, ao preço
+        de uma consulta de topo por lado por comando.
+
+        **Por que o ``sequence_id`` é preservado, ao contrário do amend.** A perda de
+        prioridade do requisito 4 pune a alteração iniciada pelo **cliente**: quem muda de
+        ideia sobre preço ou tamanho está pedindo mais fila do que a que lhe foi concedida, e
+        paga com tempo — ADR 0005. A reprecificação de uma pegged não parte do cliente; parte
+        da engine, cumprindo o contrato que a ordem pediu ao ser enviada. Puni-la seria
+        cobrar prioridade por um movimento que o dono da ordem não fez e não pode evitar, e a
+        cada tick de mercado: o tipo de ordem ficaria inútil, porque a pegged desceria ao fim
+        da fila toda vez que o topo se mexesse. É também o que faz o exemplo do enunciado
+        fechar — a pegged reprecificada aparece **acima** da limit que provocou a mudança,
+        porque chegou antes dela. Ver ADR 0004.
+
+        **Por que as ordens já no preço certo não são tocadas.** Retirá-las e reinseri-las
+        produziria o mesmo livro apenas por acidente: elas voltariam pelo mesmo caminho das
+        que se moveram, com o mesmo ``sequence_id``, e o merge as recolocaria onde estavam —
+        mas ao custo de K remoções e K inserções por comando, e com uma janela em que o nível
+        de referência fica sem elas. Não tocá-las é mais barato e é o que torna a operação um
+        no-op de verdade quando o topo não mudou, que é o caso da esmagadora maioria dos
+        comandos. Também é o que faz o teste de idempotência ser escrevível: reconciliar duas
+        vezes seguidas não emite evento na segunda.
+
+        A flag de reentrância é um tripwire para a prova acima, e não uma defesa contra um
+        caminho existente: hoje nada aqui chama de volta a engine, e é isso que a prova
+        afirma. Se um dia algo passar a chamar — um listener, um gatilho, uma reprecificação
+        que dispare matching —, a prova estará quebrada, e falhar alto no primeiro comando é
+        muito melhor do que um laço infinito ou uma cascata que termina por sorte. Por isso é
+        ``RuntimeError`` e não ``ValueError``: nenhum comando malformado alcança este ponto.
+
+        Complexidade: O(K log K) para ordenar as pegged do lado, O(1) por ordem que não se
+        move, e o merge do bloco em O(K + M), com M pago só quando há intercalação real —
+        ver ``OrderQueue.merge_ordered``.
+        """
+        if self._reconciling:
+            raise RuntimeError(
+                f"reconciliação de pegged reentrante no lado {side.name}: a prova de "
+                f"terminação em uma passada foi violada"
+            )
+
+        self._reconciling = True
+        try:
+            book_side = self._book.side(side)
+            pegged = sorted(
+                [
+                    *book_side.pegged_orders,
+                    *(order for order in self._book.parked_orders if order.side is side),
+                ],
+                key=lambda order: order.sequence_id,
+            )
+            if not pegged:
+                return []
+
+            reference = book_side.best_non_pegged_price
+            if reference is None:
+                return self._park_pegged(pegged)
+            return self._reprice_pegged(pegged, reference)
+        finally:
+            self._reconciling = False
+
+    def _park_pegged(self, pegged: list[Order]) -> list[Event]:
+        """Manda para fora do livro as pegged que ficaram sem referência de preço.
+
+        Acontece quando a última não-pegged do lado sai — cancelada ou executada — e as
+        pegged perdem aquilo a que se ancoravam. Elas não são canceladas: o cliente pediu uma
+        ordem que acompanha o topo, e o topo pode voltar a existir no comando seguinte. O que
+        se perde ao cancelar é a intenção; o que se perde ao estacionar é apenas a exposição,
+        que é justamente o que não existe mais.
+
+        A retirada é ``OrderBook.remove``, e não ``BookSide.remove``, porque só ela fecha as
+        três baixas: a ordem sai do nível, o nível esvaziado sai do índice de preços — item 2
+        dos invariantes — e a ordem sai do índice global. Ela volta ao índice global logo em
+        seguida por ``park``, agora como ordem sem preço, que é o que ``park`` exige.
+
+        As que já estavam *parked* não emitem evento: nada mudou para elas, e um evento por
+        comando repetindo que a ordem continua esperando seria ruído sobre um não-fato.
+        """
+        events: list[Event] = []
+        for order in pegged:
+            if order.is_parked:
+                continue
+
+            self._book.remove(order)
+            order.repeg_to(None)
+            self._book.park(order)
+            events.append(self._pegged_event(order))
+        return events
+
+    def _reprice_pegged(self, pegged: list[Order], reference: Ticks) -> list[Event]:
+        """Move para ``reference`` as pegged que estão em outro preço, ou *parked*.
+
+        O bloco preserva a ordem por ``sequence_id`` que vem de quem chama — é subsequência
+        de uma lista já ordenada —, que é a pré-condição de ``merge_ordered``.
+
+        Sair e voltar, em vez de mutar o preço no lugar, é a mesma exigência do amend: o
+        nível é indexado por preço e é a autoridade sobre o preço do que guarda, então uma
+        ordem reprecificada dentro da fila ficaria alojada num nível que não é o dela, e
+        seria anunciada e executada a um preço que não é o seu. Sair também é o que faz os
+        totais dos dois níveis fecharem sem correção manual.
+
+        ``OrderBook.remove`` trata os dois casos de origem sem que este laço precise
+        distingui-los: a ordem que está no livro sofre as três baixas, e a *parked* é
+        desviada para ``unpark``. As duas saem do índice global, e ``merge_ordered`` as
+        devolve a ele junto com o lado.
+        """
+        moving = [order for order in pegged if order.price != reference]
+        if not moving:
+            return []
+
+        for order in moving:
+            self._book.remove(order)
+            order.repeg_to(reference)
+        self._book.merge_ordered(moving)
+        return [self._pegged_event(order) for order in moving]
+
+    @staticmethod
+    def _pegged_event(order: Order) -> OrderPegged:
+        """Retrato da pegged no estado em que ela ficou: no preço que assumiu, ou *parked*.
+
+        Lê ``remaining``, e não ``quantity``, porque é o saldo que passa a ser oferecido ao
+        preço novo — mesma convenção de ``OrderAccepted`` e ``OrderAmended``.
+
+        A guarda é integridade, não entrada: quem chega aqui veio do registro de pegged do
+        lado ou do registro de *parked*, e uma ordem sem ``peg_reference`` em qualquer um dos
+        dois é a engine tendo perdido a conta de si mesma.
+        """
+        reference = order.peg_reference
+        if reference is None:
+            raise OrderIntegrityError(
+                f"ordem {order.order_id} não é pegged e não produz evento de peg"
+            )
+
+        return OrderPegged(
+            order_id=order.order_id,
+            side=order.side,
+            reference=reference,
+            price=order.price,
+            quantity=order.remaining,
         )
 
     def _submit(

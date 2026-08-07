@@ -88,8 +88,8 @@ class Cli:
                 return format_events(self._engine.submit_limit(side, price, quantity))
             case SubmitMarket(side=side, quantity=quantity):
                 return format_events(self._engine.submit_market(side, quantity))
-            case SubmitPegged():
-                return [_not_implemented("peg")]
+            case SubmitPegged(reference=reference, side=side, quantity=quantity):
+                return format_events(self._engine.submit_pegged(reference, side, quantity))
             case CancelOrder(order_id=order_id):
                 return format_events(self._engine.cancel(order_id))
             case ModifyOrder(order_id=order_id, price=price, quantity=quantity):
@@ -145,7 +145,3 @@ def run(cli: Cli, stream_in: TextIO, stream_out: TextIO) -> None:
         # traceback do interpretador sobre um pedido perfeitamente legítimo do usuário.
         stream_out.write("\n")
         stream_out.flush()
-
-
-def _not_implemented(name: str) -> str:
-    return f"Error: comando ainda não implementado: {name}"

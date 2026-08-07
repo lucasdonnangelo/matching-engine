@@ -29,6 +29,7 @@ from matching_engine.domain.events import (
     OrderAccepted,
     OrderAmended,
     OrderCancelled,
+    OrderPegged,
     Trade,
 )
 from matching_engine.domain.order import OrderId
@@ -89,6 +90,8 @@ def format_events(events: Sequence[Event]) -> list[str]:
                 lines.append(_accepted_line(event))
             case OrderAmended():
                 lines.append(_amended_line(event))
+            case OrderPegged():
+                lines.append(_pegged_line(event))
             case OrderCancelled():
                 lines.append(_CANCELLED_LINE)
             case BookSnapshot():
@@ -171,6 +174,32 @@ def _amended_line(event: OrderAmended) -> str:
     que o comando seguinte exibe em ordem.
     """
     return _order_line("amended", event.side, event.quantity, event.price, event.order_id)
+
+
+def _pegged_line(event: OrderPegged) -> str:
+    """A mesma linha das outras ordens, com o verbo trocado; *parked* troca o preço por uma palavra.
+
+    O enunciado **não** especifica saída para ordem pegged: ele mostra o livro depois do
+    comando, e não a linha de confirmação. A escolha é a mesma de ``_amended_line``, e pela
+    mesma razão: num REPL, comando que não responde é indistinguível de comando que não fez
+    nada, e entre inventar um formato e reaproveitar o que já existe, reaproveita-se. Quem leu
+    ``Order created: buy 200 @ 10 1`` lê ``Order pegged: buy 150 @ 10.1 2`` sem aprender nada
+    novo — e, como a linha sai **de novo** a cada reprecificação, com o mesmo id, ela conta na
+    tela a história que o livro conta na fila: aquela ordem mudou de preço sozinha.
+
+    ``parked`` ocupa exatamente o lugar de ``@ <preço>`` porque é isso que ela é: a resposta à
+    pergunta "a que preço", quando não há preço nenhum. Um ``@ -`` ou um ``@ None`` diriam a
+    mesma coisa pior, e omitir o campo produziria uma linha mais curta que o leitor teria de
+    diferenciar contando tokens. A palavra também é a única no lugar onde sempre houve um
+    número, o que a torna difícil de ler por engano.
+
+    ``reference`` fica de fora, como ``priority_renewed`` fica de fora da linha de amend: o
+    efeito dela é o preço que a ordem assume, e esse preço já está na linha.
+    """
+    if event.price is None:
+        side = event.side.name.lower()
+        return f"Order pegged: {side} {event.quantity} parked {event.order_id}"
+    return _order_line("pegged", event.side, event.quantity, event.price, event.order_id)
 
 
 def _order_line(verb: str, side: Side, quantity: int, price: Ticks, order_id: OrderId) -> str:
