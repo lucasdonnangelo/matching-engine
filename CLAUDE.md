@@ -104,7 +104,7 @@ Toda operação preserva, e a suíte de propriedade verifica após **cada** coma
 | Best bid / best offer | O(log P) |
 | Cancel | O(1) esperado, + O(log P) se o nível esvaziar |
 | Amend (reduz qty) | O(1) |
-| Amend (preço ou aumenta qty) | O(log P) |
+| Amend (preço ou aumenta qty) | O(log P + F) |
 | Reprecificar pegged | O(K log K) no caso comum; O(K log K + M) quando há intercalação real |
 | `print book` | O(N) — inerente à saída |
 | Espaço | O(N + P) |
@@ -159,6 +159,11 @@ ordenação defensiva não depende de nenhum desses elos. Ver `BookSide.pegged_o
   sinaliza entrada inválida do usuário; derivada de `RuntimeError`
   (`QueueIntegrityError`, `LevelIntegrityError`) sinaliza inconsistência interna da
   engine — comando malformado nunca chega a elas.
+- O `mypy` strict cobre `src/` e **não** `tests/`, por decisão. Dublê parcial, monkeypatch
+  e construção deliberada de estado inválido — para provar que a guarda o recusa — são
+  legítimos em teste e ilegítimos em produção. Endurecer o verificador ali levaria a
+  `type: ignore` espalhados, que anestesiam a checagem onde ela importa, ou a testes
+  contorcidos para agradar o checker em vez de descrever o caso que verificam.
 
 ---
 
@@ -178,8 +183,10 @@ cancelamento, alteração e ordens pegged.
 
 ## 8. Regras de trabalho para agentes
 
-- **Não criar commits. Não rodar `git`.** O histórico é curado manualmente e faz parte
-  da avaliação do projeto.
+- **Não criar commits, não reescrever histórico, não fazer push.** O histórico é curado
+  manualmente e faz parte da avaliação do projeto. Comandos de LEITURA do git (`log`,
+  `show`, `diff`, `blame`, `-S`/`-G`) são permitidos e úteis para conferir o que já foi
+  decidido.
 - Não criar arquivos além dos explicitamente pedidos.
 - Não adicionar dependências. As permitidas são: `sortedcontainers`, `pytest`,
   `hypothesis`, `ruff`, `mypy`.

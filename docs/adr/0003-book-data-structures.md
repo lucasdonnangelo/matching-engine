@@ -130,7 +130,7 @@ Conferência contra as metas da seção 5 do contrato:
 | Best bid / best offer | O(log P) | leitura de ponta | sim |
 | Cancel | O(1) esperado, + O(log P) se esvaziar | índice O(1) + fila O(1) + baixa do nível O(log P) | sim |
 | Amend (reduz qty) | O(1) | `PriceLevel.reduce` no lugar, sem tocar na fila | sim |
-| Amend (preço ou aumenta qty) | O(log P) | remoção O(1) + baixa O(log P) + reinserção O(log P) | sim |
+| Amend (preço ou aumenta qty) | O(log P + F) | remoção O(1) + baixa O(log P) + F execuções O(1) + reinserção O(log P) | sim |
 | Reprecificar pegged | O(K log K); + M com intercalação | coleta O(K log K) + merge O(K + M) | sim |
 | `print book` | O(N) | uma linha por ordem viva | sim |
 | Espaço | O(N + P) | N ordens que são os próprios nós + P níveis | sim |
