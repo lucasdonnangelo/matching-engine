@@ -200,16 +200,21 @@ não existe como objeto, e nenhuma camada adiante precisa reverificá-lo.
   da fila, e `add` só sabe inserir no fim.
 - `BookSide` mantém um registro das pegged que estão no livro. Sem ele, alcançá-las custaria
   O(M) na fila do nível em que estão, e a meta O(K) da seção 5 do contrato cairia justamente
-  no caso comum — o da limit nova melhorando o topo. O registro é mantido em `add` e
-  `remove`, que são as duas únicas portas de um lado, e por isso não tem como divergir.
+  no caso comum — o da limit nova melhorando o topo. O registro é mantido em `add`,
+  `merge_ordered` e `remove`, que são as três únicas portas de um lado, e por isso não tem
+  como divergir.
 - `Order.repeg_to` é a única porta por onde o preço de uma pegged muda, e ela exige a ordem
   fora de qualquer fila — a mesma guarda de `amend_to`, pelo mesmo motivo: o nível é a
   autoridade sobre o preço do que guarda.
 - A reprecificação é o **único** custo linear não inerente do sistema, e é cobrado com
   parcimônia: O(K) no caso comum, O(K + M) só quando o topo muda por cancelamento e há
   intercalação real. Ver `OrderQueue.merge_ordered` e a seção 5 do contrato.
-- Ordem pegged *parked* continua não sendo alterável por `modify`: sem preço e fora dos dois
-  lados, nenhuma das duas políticas da ADR 0005 se aplica a ela. Cancelá-la funciona.
+- `modify` não altera o **preço** de uma pegged, esteja ela no livro ou *parked*: quem envia
+  uma pegged delegou o preço à engine, e um preço vindo do cliente seria desfeito pela
+  reconciliação no mesmo comando — cobrando prioridade por uma mudança que não vigora — ou,
+  se cruzasse o spread, faria a pegged executar como agressora. Alterar a **quantidade**
+  permanece válido para a pegged que está no livro, sob a política da ADR 0005; a *parked*,
+  sem nível de que reduzir, segue apenas cancelável.
 
 ## Alternativas rejeitadas
 

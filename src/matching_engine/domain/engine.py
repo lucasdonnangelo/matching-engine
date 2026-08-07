@@ -226,9 +226,20 @@ class MatchingEngine:
         ordem estivesse a 10, e ela está. Recusar obrigaria quem escreve script a conferir
         antes o estado do livro para saber se pode mandar o comando.
 
-        Ordem *parked* — pegged sem referência, fora dos dois lados — não é alterável nesta
-        etapa. Ela não tem preço nem nível, de modo que nenhuma das duas políticas se aplica
-        a ela sem uma decisão própria, que a etapa de pegged toma.
+        **Pegged não admite alteração de preço**, esteja no livro ou *parked*: quem envia
+        uma pegged delegou o preço à engine — é a definição do tipo de ordem. Aceitar o
+        pedido produzia uma operação que cobra e não entrega: o comando emitia
+        ``OrderAmended`` com o preço pedido e, na mesma resposta, ``OrderPegged``
+        desfazendo-o pela reconciliação, de modo que o preço nunca vigorava mas a ordem
+        pagava prioridade por ele. Pior: um preço pedido que cruzasse o spread fazia a
+        pegged executar como agressora, o que contradiz a narrativa do tipo de ordem mesmo
+        sem violar a prova do ADR 0004, que cobre apenas a reprecificação iniciada pela
+        engine. Alterar a **quantidade** de uma pegged no livro continua válido e segue o
+        caminho comum: reduzir mantém o lugar, aumentar renova.
+
+        Ordem *parked* — pegged sem referência, fora dos dois lados — não admite alteração
+        de quantidade tampouco: ela não está em nível nenhum, então não há caminho de
+        redução in place, nem preço a que uma renovação a devolvesse. Cancelá-la funciona.
 
         Complexidade: O(1) na redução pura — o índice global acha a ordem, o índice de
         preços acha o nível, e o resto é uma subtração — e O(log P + F) quando renova, que é
@@ -246,11 +257,17 @@ class MatchingEngine:
                 f"ordem {order_id} não está no livro (id inexistente, já cancelada ou já executada)"
             )
 
+        if new_price is not None and order.is_pegged:
+            raise ValueError(
+                f"ordem {order_id} é pegged e o seu preço é ditado pelo livro, não pelo "
+                f"cliente: altere a quantidade, ou cancele e envie uma limit"
+            )
+
         current_price = order.price
         if current_price is None:
             raise ValueError(
-                f"ordem {order_id} está parked, à espera de referência de peg, e ainda não pode "
-                f"ser alterada"
+                f"ordem {order_id} está parked, à espera de referência de peg, e fora do "
+                f"livro não há quantidade a alterar no lugar"
             )
 
         executed = order.quantity - order.remaining

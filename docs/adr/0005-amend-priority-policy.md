@@ -87,8 +87,10 @@ outro jeito não seria só diferente: seria explorável de um modo que quem oper
   e o cliente teria achado o caminho para crescer de graça — encolher e voltar.
 - A ordem alterada mantém o `order_id` e recebe `sequence_id` novo, o que exige contadores
   separados para os dois no `OrderBook`.
-- Ordem pegged *parked* não é alterável nesta etapa: sem preço e fora dos dois lados, nenhuma
-  das duas políticas se aplica a ela sem uma decisão própria, que é da etapa de pegged.
+- Para ordens pegged, a política vale apenas para a quantidade: alteração de **preço** sobre
+  pegged é recusada sempre, porque o preço de uma pegged é delegado à engine — ver ADR 0004.
+  Alteração de **quantidade** vale quando a ordem está no livro; a *parked*, fora dos dois
+  lados, não é alterável, apenas cancelável.
 
 ## Alternativas rejeitadas
 

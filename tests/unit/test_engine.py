@@ -906,6 +906,79 @@ def test_a_parked_pegged_order_can_be_cancelled() -> None:
     assert len(engine.book) == 0
 
 
+@pytest.mark.parametrize("new_quantity", [None, 60], ids=["só preço", "preço e quantidade"])
+def test_amending_the_price_of_a_pegged_order_is_rejected(new_quantity: int | None) -> None:
+    """O preço de uma pegged é delegado à engine — é a definição do tipo de ordem.
+
+    Aceito, o pedido seria desfeito pela reconciliação no mesmo comando: ``OrderAmended``
+    com o preço pedido e ``OrderPegged`` desfazendo-o na mesma resposta, com a ordem
+    pagando prioridade por uma mudança que nunca vigora.
+    """
+    engine = MatchingEngine()
+    limit = resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+    sequence_id = peg.sequence_id
+
+    with pytest.raises(ValueError, match="ditado pelo livro"):
+        engine.amend(peg.order_id, Ticks(1010), new_quantity)
+
+    assert peg.price == 1000  # a recusa não deixa rastro
+    assert peg.sequence_id == sequence_id
+    assert peg.remaining == 150
+    assert list(level_of(engine, Side.BUY, Ticks(1000))) == [limit, peg]
+    assert engine.book.best_bid == 1000
+
+
+def test_amending_the_price_of_a_parked_pegged_order_is_rejected() -> None:
+    """Parked ou no livro, a recusa é a mesma: o preço de uma pegged não é do cliente."""
+    engine = MatchingEngine()
+    peg = pegged(engine, Side.BUY, 150)
+    assert peg.is_parked
+
+    with pytest.raises(ValueError, match="ditado pelo livro"):
+        engine.amend(peg.order_id, Ticks(1010), None)
+
+    assert peg.is_parked
+    assert peg.price is None
+    assert len(engine.book) == 1
+
+
+def test_amending_the_quantity_of_a_pegged_order_reduces_in_place() -> None:
+    """Quantidade não é preço: a redução segue a política comum e mantém o lugar na fila."""
+    engine = MatchingEngine()
+    limit = resting(engine, Side.BUY, Ticks(1000), 200)
+    peg = pegged(engine, Side.BUY, 150)
+    behind = resting(engine, Side.BUY, Ticks(1000), 100)
+    sequence_id = peg.sequence_id
+
+    events = engine.amend(peg.order_id, None, 40)
+
+    level = level_of(engine, Side.BUY, Ticks(1000))
+    assert list(level) == [limit, peg, behind]
+    assert peg.sequence_id == sequence_id
+    assert peg.quantity == 40
+    assert peg.remaining == 40
+    assert level.total_quantity == 340
+    [amended] = amendments_of(events)
+    assert amended.quantity == 40
+    assert not amended.priority_renewed
+    assert pegs_of(events) == []  # a referência não se moveu, e a reconciliação não toca nela
+
+
+def test_amending_the_quantity_of_a_parked_pegged_order_is_rejected() -> None:
+    """Fora do livro não há nível: nem redução in place, nem preço a que uma renovação
+    devolvesse a ordem. Cancelar é o único caminho, e tem teste próprio."""
+    engine = MatchingEngine()
+    peg = pegged(engine, Side.BUY, 150)
+
+    with pytest.raises(ValueError, match="está parked, à espera de referência"):
+        engine.amend(peg.order_id, None, 40)
+
+    assert peg.is_parked
+    assert peg.remaining == 150
+    assert len(engine.book) == 1
+
+
 def test_several_pegged_orders_share_the_price_and_keep_their_order_among_themselves() -> None:
     engine = MatchingEngine()
     resting(engine, Side.BUY, Ticks(1000), 200)

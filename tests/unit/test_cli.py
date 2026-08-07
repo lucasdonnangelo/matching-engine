@@ -244,6 +244,20 @@ def test_a_modify_that_crosses_the_book_trades_from_the_repl() -> None:
     ]
 
 
+def test_modifying_the_price_of_a_pegged_order_is_an_error_line() -> None:
+    """A recusa é resposta, não encerramento — e a quantidade da pegged continua alterável."""
+    cli = Cli(MatchingEngine())
+    cli.execute("limit buy 10 100")
+    cli.execute("peg bid buy 50")
+
+    lines = cli.execute("modify order 2 price 12")
+
+    assert len(lines) == 1
+    assert lines[0].startswith("Error: ")
+    assert not cli.should_quit
+    assert cli.execute("modify order 2 qty 30") == ["Order amended: buy 30 @ 10 2"]
+
+
 def test_modifying_an_unknown_id_is_an_error_line() -> None:
     cli = Cli(MatchingEngine())
 
