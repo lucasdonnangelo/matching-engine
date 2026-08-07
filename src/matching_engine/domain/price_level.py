@@ -3,9 +3,9 @@
 ``total_quantity`` é mantido incrementalmente, e não calculado sob demanda, por causa da
 assimetria entre leitura e escrita. Recalcular custaria O(N) no nível — varredura que a
 seção 5 do contrato proíbe fora dos três casos inerentes, e este não é um deles —,
-enquanto manter custa uma soma de ``int`` embutida em ``add``, ``remove``, ``fill`` e
-``reduce``, que já são O(1) e que são os únicos pontos por onde o remanescente do nível
-pode mudar. A
+enquanto manter custa uma soma de ``int`` embutida em ``add``, ``merge_ordered``,
+``remove``, ``fill`` e ``reduce``, os únicos pontos por onde o remanescente do nível
+pode mudar, a custo constante por ordem tocada. A
 quantidade agregada é consultada muito mais vezes do que muda: entra na impressão do
 livro, na agregação por preço e em qualquer decisão que olhe o topo, ao passo que só
 muda quando uma ordem entra, sai ou executa.
@@ -45,7 +45,7 @@ class PriceLevel:
     nível de outro. Reprecificar uma ordem é movê-la de nível, nunca mover o nível.
 
     ``total_quantity`` é somente-leitura de fora pelo mesmo motivo: ele é derivado das
-    ordens da fila e só se mantém verdadeiro se as quatro operações que o alteram forem as
+    ordens da fila e só se mantém verdadeiro se as cinco operações que o alteram forem as
     únicas a escrevê-lo.
     """
 
@@ -77,8 +77,8 @@ class PriceLevel:
         o topo do livro — isto é, praticamente todo comando. Descobrir por varredura se um
         nível ainda guarda alguma ordem não-pegged custaria O(N) no nível, que é exatamente
         a varredura proibida pela seção 5 do contrato; manter a conta custa um ``int`` nas
-        duas operações que já são O(1) e que são as únicas por onde a **composição** do
-        nível muda.
+        três operações por onde a **composição** do nível muda — ``add``, ``merge_ordered``
+        e ``remove``.
 
         ``fill`` e ``reduce`` não mexem nele de propósito: executar ou encolher altera
         quantidade, não composição — a ordem continua no nível, pegged ou não como antes.

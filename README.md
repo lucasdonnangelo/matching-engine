@@ -120,7 +120,7 @@ python -m matching_engine
 Verificações — as três rodam na CI, em Python 3.12 e 3.13:
 
 ```bash
-pytest          # 557 testes
+pytest          # 561 testes
 ruff check .    # lint
 mypy            # tipos, modo strict
 ```
@@ -314,9 +314,9 @@ sentidos e ordem de chegada dentro do nível.
 
 ## Testes
 
-557 testes, em três camadas.
+561 testes, em três camadas.
 
-- **Unitários** (`tests/unit/`, 545): uma suíte por módulo, viajando no mesmo commit que o
+- **Unitários** (`tests/unit/`, 549): uma suíte por módulo, viajando no mesmo commit que o
   código que testam. Cobrem caso feliz, entrada inválida, execução parcial e total, livro
   vazio, múltiplos níveis, FIFO dentro do nível, e as guardas de integridade de cada camada.
 - **Propriedade** (`tests/property/`, 7 funções, cada uma reexecutada por 100 a 300 exemplos
@@ -420,7 +420,10 @@ conserto — o preço de manter o histórico limpo é que ele não exibe o camin
   "O(1) no caso comum (splice)", supondo um ramo dedicado de splice na fila. A medição mostrou
   que esse ramo economizaria fator constante, e não ordem de complexidade, porque no caso comum
   o laço geral do merge já é O(K) sozinho — o cursor da fila de destino não chega a avançar. O
-  ramo dedicado não foi adiante e a meta foi corrigida para O(K).
+  ramo dedicado não foi adiante e a meta foi corrigida para O(K). O fator log da meta atual —
+  O(K log K), como na tabela acima — entrou depois, em `ad3bc1e`, com a decisão de ordenar as
+  pegged defensivamente por `sequence_id` na coleta, em vez de confiar na ordem de inserção do
+  registro — ver `BookSide.pegged_orders`.
 - **Guarda de pertencimento em `PriceLevel.fill`** (commit `3c4eb6e`). `add` e `remove` herdam
   a guarda da `OrderQueue`, mas `fill` não herda nenhuma, porque `Order.fill` não conhece
   níveis: sem a checagem, `level_A.fill(ordem_do_level_B, 5)` executaria em B e debitaria o

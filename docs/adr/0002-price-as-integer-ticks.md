@@ -25,11 +25,13 @@ nem no domínio, nem na fronteira de I/O. Em
 [`domain/price.py`](../../src/matching_engine/domain/price.py), a conversão entre texto e
 ticks é manipulação de string seguida de aritmética de `int`.
 
-O formato do texto é validado por regex (`^\d+(\.\d+)?$`) **antes** da conversão. Isso
-rejeita de uma só vez negativos, notação científica, `NaN`, `Infinity`, string vazia,
-espaços em volta, `"10."` e `".5"` — todos valores que `Decimal` aceitaria de bom grado.
-O que sobrevive ao regex é dígitos com no máximo um ponto decimal, e daí em diante
-separar as duas partes e somar inteiros é suficiente.
+O formato do texto é validado por regex (`\d+(\.\d+)?`, aplicado com `fullmatch`) **antes**
+da conversão. `fullmatch`, e não `match` com âncoras: em Python, `$` casa também logo antes
+de um `\n` final, então `"10\n"` passaria — e, como `int()` ignora whitespace, o preço
+seria aceito em silêncio. A validação rejeita de uma só vez negativos, notação científica,
+`NaN`, `Infinity`, string vazia, espaços em volta, `"10."` e `".5"` — todos valores que
+`Decimal` aceitaria de bom grado. O que sobrevive ao regex é dígitos com no máximo um ponto
+decimal, e daí em diante separar as duas partes e somar inteiros é suficiente.
 
 ## Alternativas rejeitadas
 
