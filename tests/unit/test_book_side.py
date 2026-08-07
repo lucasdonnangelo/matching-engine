@@ -200,19 +200,6 @@ def test_level_at_does_not_create_the_level(side: Side) -> None:
 
 
 @pytest.mark.parametrize("side", SIDES)
-def test_level_for_creates_once_and_reuses(side: Side) -> None:
-    book_side = BookSide(side)
-
-    created = book_side.level_for(Ticks(1000))
-
-    assert created.price == 1000
-    assert created.is_empty
-    assert book_side.level_for(Ticks(1000)) is created
-    assert book_side.level_at(Ticks(1000)) is created
-    assert len(book_side) == 1
-
-
-@pytest.mark.parametrize("side", SIDES)
 def test_remove_keeps_the_emptied_level_in_the_index(side: Side) -> None:
     """Tirar a última ordem não tira o nível: essa baixa é do chamador, e é explícita."""
     book_side = BookSide(side)

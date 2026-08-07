@@ -179,14 +179,6 @@ class BookSide:
         level: PriceLevel | None = self._levels.get(price)
         return level
 
-    def level_for(self, price: Ticks) -> PriceLevel:
-        """Nível daquele preço, criando-o se ainda não existir. O(log P) quando cria."""
-        level = self.level_at(price)
-        if level is None:
-            level = PriceLevel(price)
-            self._levels[price] = level
-        return level
-
     def add(self, order: Order) -> None:
         """Roteia a ordem para o nível do seu preço, criando o nível se preciso.
 
@@ -203,9 +195,10 @@ class BookSide:
         no índice é a quebra do item 2 dos invariantes: ele apareceria no topo do lado,
         anunciando preço sem quantidade nenhuma por trás.
 
-        O registro de pegged é atualizado por último, e é aqui que ele fica total: ``add`` e
-        ``remove`` são as duas únicas portas por onde uma ordem entra e sai de um lado, então
-        o registro não tem como divergir do livro sem que uma delas seja contornada.
+        O registro de pegged é atualizado por último, e é aqui que ele fica total: ``add``,
+        ``merge_ordered`` e ``remove`` são as três únicas portas por onde uma ordem entra e
+        sai de um lado, e as três mantêm o registro, então ele não tem como divergir do
+        livro sem que uma delas seja contornada.
         """
         if order.side is not self._side:
             raise LevelIntegrityError(
